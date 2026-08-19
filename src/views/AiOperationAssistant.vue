@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { reactive, ref, onMounted, computed, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ChatDotRound, Close, Promotion, Loading } from '@element-plus/icons-vue'
-import { chatAIStream, type ChatMessage, optimizeProductTitle, generateMarketingCopy, generateCustomerServiceReply } from '@/utils/aiApi'
+import { ChatDotRound , Loading } from '@element-plus/icons-vue'
+import { buildChatContext, chatAIStream, type ChatMessage, optimizeProductTitle, generateMarketingCopy, generateCustomerServiceReply } from '@/utils/aiApi'
 import { useAIStore } from '@/stores/aiStore'
+import AiChat from './AiChat.vue'
 
 const aiStore = useAIStore()
 const historyVisible = ref(false)
@@ -69,18 +70,9 @@ watch(
 const openChat = (seed?: string) => {
   chatVisible.value = true
   if (seed && seed.trim()) {
-    chatInput.value = `基于下面内容继续优化/改写，给 2-3 个版本：\n\n${seed.trim()}`
+    chatInput.value = `基于下面内容继续优化/改写，给 2-3 个版本：\n${seed.trim()}`
   }
   void scrollChatToBottom()
-}
-
-const closeChat = () => {
-  chatVisible.value = false
-}
-
-const clearChat = () => {
-  aiStore.clearChat()
-  ElMessage.success('已清空对话历史')
 }
 
 const handleChatSend = async () => {
@@ -88,15 +80,17 @@ const handleChatSend = async () => {
   if (!content || chatSending.value) return
 
   chatSending.value = true
-  aiStore.addChatMessage({ role: 'user', content })
+  await aiStore.addChatMessage({ role: 'user', content })
   chatInput.value = ''
 
   try {
-    const context: ChatMessage[] = aiStore.chatMessages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }))
-    const assistantId = aiStore.addChatMessage({ role: 'assistant', content: '' })
+    const context: ChatMessage[] = buildChatContext(
+      aiStore.chatMessages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }))
+    )
+    const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
     let acc = ''
     await chatAIStream(context, {
       max_tokens: aiStore.userConfig.maxTokens,
@@ -129,9 +123,7 @@ const handleTitleGenerate = async () => {
   titleLoading.value = true
   optimizedTitle.value = '' 
   try {
-    console.log('开始优化标题:', titleForm.original)
     const result = await optimizeProductTitle(titleForm.original, titleForm.keywords)
-    console.log('AI返回的标题:', result)
     optimizedTitle.value = result
     ElMessage.success('标题优化成功！')
     aiStore.addHistory({
@@ -160,9 +152,7 @@ const handleCopyGenerate = async () => {
   generatedCopy.value = '' // 清空之前的结果
   
   try {
-    console.log('开始生成文案:', copyForm.product)
     const result = await generateMarketingCopy(copyForm.product, copyForm.highlights, copyForm.tone)
-    console.log('AI返回的文案:', result)
     generatedCopy.value = result
     ElMessage.success('文案生成成功！')
     aiStore.addHistory({
@@ -189,10 +179,7 @@ const handleQaGenerate = async () => {
 
   qaLoading.value = true
   try {
-    console.log('开始生成客服回复:', qaForm.question)
     const answer = await generateCustomerServiceReply(qaForm.question)
-    console.log('AI返回的回复:', answer)
-    
     // 添加到建议列表顶部
     suggestions.value.unshift({
       question: qaForm.question,
@@ -252,6 +239,7 @@ onMounted(() => {
       </div>
     </section>
 
+    <!-- 标题生成 -->
     <el-row :gutter="20">
       <el-col :xs="24" :md="12" :xl="8">
         <section class="panel tool-panel">
@@ -290,6 +278,7 @@ onMounted(() => {
         </section>
       </el-col>
 
+      <!-- 营销文案 -->
       <el-col :xs="24" :md="12" :xl="8">
         <section class="panel tool-panel">
           <div class="section-title">营销文案生成</div>
@@ -333,6 +322,7 @@ onMounted(() => {
         </section>
       </el-col>
 
+      <!-- 客服回答 -->
       <el-col :xs="24" :md="12" :xl="8">
         <section class="panel tool-panel">
           <div class="section-title">客服话术建议</div>
@@ -361,6 +351,7 @@ onMounted(() => {
       </el-col>
     </el-row>
 
+    <!-- ai生成 历史记录 -->
     <el-dialog v-model="historyVisible" title="AI 生成历史" width="720px">
       <template #default>
         <div class="history-filter">
@@ -402,58 +393,13 @@ onMounted(() => {
       </template>
     </el-dialog>
 
+    <!-- 悬浮对话框 -->
     <div class="floating-ball">
       <el-button class="floating-btn" type="primary" circle :icon="ChatDotRound" @click="openChat()" />
       <div class="floating-hint">对话</div>
     </div>
 
-    <div v-if="chatVisible" class="chat-float">
-      <div class="chat-float-header">
-        <div class="chat-float-header-left">
-          <div class="chat-float-title">AI 对话</div>
-          <div class="chat-float-subtitle">基于当前运营场景持续追问和改写</div>
-        </div>
-        <div class="chat-float-header-right">
-          <el-button text size="small" @click="clearChat">清空</el-button>
-          <el-button :icon="Close" circle text @click="closeChat" />
-        </div>
-      </div>
-      <div ref="chatListRef" class="chat-float-body">
-        <div v-if="chatMessages.length === 0" class="chat-float-empty">
-          <div class="chat-float-empty-title">开始和运营专家聊聊</div>
-          <div class="chat-float-empty-desc">可以把上面的标题/文案复制过来，让我给你多几个版本或针对平台规则再优化。</div>
-        </div>
-        <div v-for="m in chatMessages" :key="m.id" class="chat-msg" :class="m.role">
-          <div class="chat-bubble">
-            <pre class="chat-text">{{ m.content }}</pre>
-          </div>
-        </div>
-        <div v-if="chatSending" class="chat-msg assistant">
-          <div class="chat-bubble">
-            <span class="chat-typing">正在生成…</span>
-          </div>
-        </div>
-      </div>
-      <div class="chat-float-input">
-        <el-input
-          v-model="chatInput"
-          type="textarea"
-          :rows="2"
-          resize="none"
-          placeholder="给AI助手发送消息吧 ~"
-          @keydown.enter.exact.prevent="handleChatSend"
-        />
-        <el-button
-          type="primary"
-          :icon="Promotion"
-          :loading="chatSending"
-          :disabled="!chatInput.trim()"
-          @click="handleChatSend"
-        >
-          发送
-        </el-button>
-      </div>
-    </div>
+    <AiChat v-model:visible="chatVisible" :messages="chatMessages" @send="handleChatSend" />
   </div>
 </template>
 
@@ -577,144 +523,6 @@ onMounted(() => {
   padding: 2px 10px;
   border-radius: 999px;
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.06);
-}
-
-.chat-float {
-  position: fixed;
-  right: 24px;
-  bottom: 96px;
-  width: 350px;
-  max-width: 100%;
-  height: 660px;
-  max-height: calc(100vh - 140px);
-  background: #ffffff;
-  border-radius: 18px;
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.32);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  z-index: 60;
-}
-
-.chat-float-header {
-  padding: 12px 14px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.chat-float-header-left {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.chat-float-header-right {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.chat-float-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #0f172a;
-}
-
-.chat-float-subtitle {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.chat-float-body {
-  flex: 1;
-  padding: 10px 10px 6px;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: radial-gradient(circle at top left, rgba(148, 163, 184, 0.15), transparent 55%);
-}
-
-.chat-float-empty {
-  margin: auto;
-  text-align: center;
-  color: var(--text-muted);
-  padding: 0 12px;
-}
-
-.chat-float-empty-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: #0f172a;
-  margin-bottom: 4px;
-}
-
-.chat-float-empty-desc {
-  font-size: 12px;
-}
-
-.chat-msg {
-  display: flex;
-}
-
-.chat-msg.user {
-  justify-content: flex-end;
-}
-
-.chat-msg.assistant {
-  justify-content: flex-start;
-}
-
-.chat-bubble {
-  max-width: 85%;
-  border-radius: 14px;
-  padding: 8px 10px;
-  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.06);
-  background: #f9fafb;
-}
-
-.chat-msg.user .chat-bubble {
-  background: rgba(59, 130, 246, 0.12);
-}
-
-.chat-msg.assistant .chat-bubble {
-  background: #eff6ff;
-}
-
-.chat-text {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
-  font-size: 13px;
-  color: #111827;
-}
-
-.chat-typing {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.chat-float-input {
-  padding: 8px 10px 10px;
-  border-top: 1px solid rgba(15, 23, 42, 0.06);
-  display: flex;
-  gap: 8px;
-  align-items: flex-end;
-  background: #ffffff;
-}
-
-@media (max-width: 600px) {
-  .chat-float {
-    right: 8px;
-    left: 8px;
-    width: auto;
-    height: calc(100vh - 120px);
-    bottom: 80px;
-  }
 }
 </style>
 
