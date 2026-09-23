@@ -144,6 +144,20 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [vue(), vueDevTools(), aiDevProxyPlugin(apiKey, apiUrl)],
+    server: {
+      proxy: {
+        // /api/ai 走上面的 aiDevProxyPlugin 中间件（本地直连 DeepSeek），不要转发到 FastAPI
+        '/api/ai': {
+          target: 'http://127.0.0.1:5173',
+          changeOrigin: false,
+          bypass: () => false as never,
+        },
+        '/api': {
+          target: 'http://127.0.0.1:8000',
+          changeOrigin: true,
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),

@@ -26,7 +26,7 @@ const router = createRouter({
     {
       path: '/assistant/chat',
       name: 'assistant-chat',
-      component: () => import('../views/AiChat.vue'),
+      component: () => import('../views/AiChatPage.vue'),
     },
     {
       path: '/insights',

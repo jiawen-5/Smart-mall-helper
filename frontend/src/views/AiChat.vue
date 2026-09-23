@@ -1,12 +1,39 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ChatDotRound, Close, Promotion, Setting } from '@element-plus/icons-vue'
+import { ChatDotRound, Close, FullScreen, Promotion, Setting } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
+import { askAgentSkill, looksLikeSkillQuery } from '@/utils/backendApi'
 import { useAIStore } from '@/stores/aiStore'
+import type { ChatMessageItem } from '@/stores/aiDb'
+
+export type ChatItem = ChatMessageItem
+
+const props = withDefaults(
+  defineProps<{ visible?: boolean; messages?: ChatItem[]; standalone?: boolean }>(),
+  { visible: false, messages: undefined, standalone: true }
+)
+const emit = defineEmits<{ (e: 'update:visible', v: boolean): void; (e: 'send'): void }>()
 
 const aiStore = useAIStore()
-const chatVisible = ref(false)
+const router = useRouter()
+
+const goFullPage = () => {
+  closeChat()
+  if (router.currentRoute.value.path !== '/assistant/chat') {
+    void router.push('/assistant/chat')
+  }
+}
+// 受控模式（被 AiOperationAssistant 嵌入时）直接用传入的 visible/messages，否则用内部状态
+const innerVisible = ref(false)
+const chatVisible = computed({
+  get: () => (props.messages !== undefined ? props.visible : innerVisible.value),
+  set: (v: boolean) => {
+    if (props.messages !== undefined) emit('update:visible', v)
+    else innerVisible.value = v
+  },
+})
 const chatInput = ref('')
 const chatSending = ref(false)
 const chatListRef = ref<HTMLElement | null>(null)
@@ -30,7 +57,7 @@ const applySettings = async () => {
   ElMessage.success('设置已更新')
 }
 
-const chatMessages = computed(() => aiStore.chatMessages)
+const chatMessages = computed(() => props.messages ?? aiStore.chatMessages)
 
 const scrollChatToBottom = async () => {
   await nextTick()
@@ -73,6 +100,19 @@ const handleChatSend = async () => {
   chatInput.value = ''
 
   try {
+    // Skill 优先：查数类问题走后端 Skill（代码计算），不进大模型算数
+    if (looksLikeSkillQuery(content)) {
+      try {
+        const res = await askAgentSkill(content)
+        if (res.skill) {
+          await aiStore.addChatMessage({ role: 'assistant', content: `📊 ${res.answer}` })
+          await scrollChatToBottom()
+          return
+        }
+      } catch {
+        /* skill 失败则回落到普通 LLM 对话 */
+      }
+    }
     const context = buildChatContext(
       aiStore.chatMessages.map((m) => ({
         role: m.role,
@@ -97,26 +137,41 @@ const handleChatSend = async () => {
   }
 }
 
-defineExpose({ openChat, closeChat })
+// 供外部（如“猜你想问”）直接以文字打开并发送
+const sendMessage = (text?: string) => {
+  if (text && text.trim()) chatInput.value = text.trim()
+  chatVisible.value = true
+  void scrollChatToBottom()
+  void nextTick(() => {
+    if (chatInput.value.trim()) void handleChatSend()
+  })
+}
+
+defineExpose({ openChat, closeChat, sendMessage })
 </script>
 
 <template>
-  <div class="floating-ball">
+  <div v-if="standalone" class="floating-ball">
     <el-button class="floating-btn" type="primary" circle :icon="ChatDotRound" @click="openChat()" />
     <div class="floating-hint">对话</div>
   </div>
 
   <div v-if="chatVisible" class="chat-float">
     <div class="chat-float-header">
-      <div class="chat-float-header-left">
+      <div class="chat-float-header-row">
         <div class="chat-float-title">AI 对话</div>
-        <div class="chat-float-subtitle">基于当前运营场景持续追问和改写</div>
+        <div class="chat-float-header-right">
+          <el-button text size="small" :icon="Setting" @click="openSettings">设置</el-button>
+          <el-button text size="small" @click="clearChat">清空</el-button>
+          <el-tooltip content="全屏打开" placement="bottom">
+            <el-button :icon="FullScreen" circle text @click="goFullPage" />
+          </el-tooltip>
+          <el-button :icon="Close" circle text @click="closeChat" />
+        </div>
       </div>
-      <div class="chat-float-header-right">
-        <el-button text size="small" :icon="Setting" @click="openSettings">设置</el-button>
-        <el-button text size="small" @click="clearChat">清空</el-button>
-        <el-button :icon="Close" circle text @click="closeChat" />
-      </div>
+      <div class="chat-float-subtitle">基于当前运营场景持续追问和改写（{{
+        chatMessages.length === 0 ? '就绪' : `上下文 ${Math.min(chatMessages.length, 8)} 条`
+      }}）</div>
     </div>
     <div ref="chatListRef" class="chat-float-body">
       <div v-if="chatMessages.length === 0" class="chat-float-empty">
@@ -244,8 +299,14 @@ defineExpose({ openChat, closeChat })
 }
 
 .chat-float-header {
-  padding: 12px 14px;
+  padding: 12px 14px 10px;
   border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-float-header-row {
   display: flex;
   align-items: center;
   justify-content: space-between;

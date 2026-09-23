@@ -91,7 +91,8 @@ export const chatAIStream = async (
     })
 
     if (!response.ok || !response.body) {
-      throw new Error(`AI 流式服务不可用（${response.status}）`)
+      const text = await response.text().catch(() => '')
+      throw new Error(`AI 流式服务不可用（${response.status}）${text ? `：${text.slice(0, 200)}` : ''}`)
     }
 
     const reader = response.body.getReader()
@@ -138,7 +139,7 @@ const normalizeAIError = (error: unknown) => {
       return 'AI 请求超时，请稍后重试或减少生成内容长度'
     }
     if (axiosError.response?.status === 401) {
-      return 'AI 鉴权失败，请检查密钥配置'
+      return 'AI 鉴权失败，请检查后端/代理的 DEEPSEEK_API_KEY 配置'
     }
     if (axiosError.response?.status === 429) {
       return 'AI 请求过于频繁，请稍后重试'

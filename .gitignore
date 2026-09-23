@@ -1,5 +1,51 @@
-# Logs
-logs
+# ========== 前端 (frontend/) ==========
+# 依赖与构建产物
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/coverage/
+
+# 环境变量：.env.local / .env 含密钥，必须忽略；保留 .env.example 示例
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+!frontend/.env.example
+
+# Vite 缓存
+frontend/.vite/
+
+# 编辑器 / 操作系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.tsbuildinfo
+frontend/*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# ========== 后端 (backend/) ==========
+# Python 缓存、虚拟环境、编译产物
+backend/__pycache__/
+backend/**/__pycache__/
+*.py[cod]
+backend/.venv/
+backend/venv/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+
+# 环境变量：含数据库账号密码与 AI 密钥，必须忽略；保留 .env.example 示例
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# ========== 日志 ==========
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -7,30 +53,6 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-.DS_Store
-dist
-dist-ssr
-coverage
-*.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-*.tsbuildinfo
-
+# ========== 其他 ==========
 .eslintcache
-
-# Cypress
-/cypress/videos/
-/cypress/screenshots/
-
-# Vitest
-__screenshots__/
+frontend/.eslintcache

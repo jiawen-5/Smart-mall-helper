@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter, RouterView } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
@@ -15,6 +15,7 @@ const menuItems = [
 ]
 
 const searchKeyword = ref('')
+const isChatFullscreen = computed(() => route.path === '/assistant/chat')
 
 const handleSelect = (key: string) => {
   // console.log('菜单点击:', key, '当前路由:', route.path)
@@ -38,8 +39,8 @@ const handleCreateTask = () => {
 </script>
 
 <template>
-  <div class="app-shell">
-    <header class="app-header panel">
+  <div class="app-shell" :class="{ 'chat-fullscreen': isChatFullscreen }">
+    <header v-if="!isChatFullscreen" class="app-header panel">
       <div class="branding">
         <div class="logo-dot">SMH</div>
         <div>
@@ -65,7 +66,7 @@ const handleCreateTask = () => {
       </div>
     </header>
 
-    <nav class="app-nav panel">
+    <nav v-if="!isChatFullscreen" class="app-nav panel">
       <el-menu
         :default-active="route.path"
         mode="horizontal"
@@ -197,9 +198,19 @@ const handleCreateTask = () => {
   gap: 20px;
 }
 
+.chat-fullscreen {
+  gap: 0;
+  height: calc(100vh - 32px);
+}
+
+.chat-fullscreen .app-main {
+  flex: 1;
+  min-height: 0;
+}
+
 @media (max-width: 1024px) {
   #app {
-    padding: 16px;
+    padding: 15px;
   }
 
   .app-header {

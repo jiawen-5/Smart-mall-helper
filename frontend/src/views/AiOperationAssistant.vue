@@ -1,12 +1,26 @@
 <script setup lang="ts">
 import { reactive, ref, onMounted, computed, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ChatDotRound , Loading } from '@element-plus/icons-vue'
+import { ChatDotRound , Close, Loading } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream, type ChatMessage, optimizeProductTitle, generateMarketingCopy, generateCustomerServiceReply } from '@/utils/aiApi'
 import { useAIStore } from '@/stores/aiStore'
 import AiChat from './AiChat.vue'
+import type { ChatItem } from './AiChat.vue'
 
 const aiStore = useAIStore()
+
+// “猜你想问”建议问题（短、命中查询类 Skill）
+const suggestQuestions = [
+  '本月 GMV 是多少？',
+  '本月环比上月怎么样？',
+]
+const suggestVisible = ref(true)
+const chatRef = ref<{ sendMessage: (text?: string) => void } | null>(null)
+
+const useSuggestion = (q: string) => {
+  suggestVisible.value = false
+  chatRef.value?.sendMessage(q)
+}
 const historyVisible = ref(false)
 const historyFilter = ref<'all' | 'title' | 'copy' | 'qa'>('all')
 
@@ -212,7 +226,9 @@ const handleQaGenerate = async () => {
 }
 
 // 页面加载时显示使用提示
-onMounted(() => {
+onMounted(async () => {
+  await aiStore.ensureHydrated().catch(() => {})
+  copyForm.tone = aiStore.userConfig.tone
   optimizedTitle.value = '请输入标题并点击"一键生成"获取AI优化结果'
   generatedCopy.value = '请输入商品信息并点击"生成文案"获取AI创作内容'
   
@@ -394,12 +410,21 @@ onMounted(() => {
     </el-dialog>
 
     <!-- 悬浮对话框 -->
+    <div v-if="suggestVisible" class="suggest-pop">
+      <div class="suggest-header">
+        <span class="suggest-title">猜你想问</span>
+        <el-button :icon="Close" circle link size="small" @click="suggestVisible = false" />
+      </div>
+      <button v-for="q in suggestQuestions" :key="q" class="suggest-item" type="button" @click="useSuggestion(q)">
+        {{ q }}
+      </button>
+    </div>
     <div class="floating-ball">
       <el-button class="floating-btn" type="primary" circle :icon="ChatDotRound" @click="openChat()" />
       <div class="floating-hint">对话</div>
     </div>
 
-    <AiChat v-model:visible="chatVisible" :messages="chatMessages" @send="handleChatSend" />
+    <AiChat ref="chatRef" v-model:visible="chatVisible" :messages="chatMessages" :standalone="false" />
   </div>
 </template>
 
@@ -523,6 +548,50 @@ onMounted(() => {
   padding: 2px 10px;
   border-radius: 999px;
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.06);
+}
+
+.suggest-pop {
+  position: fixed;
+  right: 26px;
+  bottom: 120px;
+  z-index: 55;
+  width: 200px;
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.18);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.suggest-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px;
+}
+
+.suggest-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.suggest-item {
+  text-align: left;
+  border: none;
+  background: #fff;
+  color: #334155;
+  font-size: 13px;
+  padding: 3px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.suggest-item:hover {
+  background: rgba(63, 140, 255, 0.12);
+  color: #1d4ed8;
 }
 </style>
 
