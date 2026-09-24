@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close, FullScreen, Promotion, Setting } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
-import { askAgentSkill, looksLikeSkillQuery } from '@/utils/backendApi'
+import { askAgentSkillStream, looksLikeSkillQuery, skillIcon } from '@/utils/backendApi'
 import { useAIStore } from '@/stores/aiStore'
 import type { ChatMessageItem } from '@/stores/aiDb'
 
@@ -60,10 +60,13 @@ const applySettings = async () => {
 const chatMessages = computed(() => props.messages ?? aiStore.chatMessages)
 
 const scrollChatToBottom = async () => {
+  // 弹窗刚打开时 DOM 高度还没稳定，多等两帧再滚，避免停在顶部
   await nextTick()
-  const el = chatListRef.value
-  if (!el) return
-  el.scrollTop = el.scrollHeight
+  requestAnimationFrame(() => {
+    const el = chatListRef.value
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  })
 }
 
 watch(
@@ -73,6 +76,11 @@ watch(
     void scrollChatToBottom()
   }
 )
+
+// 打开弹窗时直接定位到底部（最新对话），而不是停在顶部
+watch(chatVisible, (v) => {
+  if (v) void scrollChatToBottom()
+})
 
 const openChat = (seed?: string) => {
   chatVisible.value = true
@@ -100,15 +108,24 @@ const handleChatSend = async () => {
   chatInput.value = ''
 
   try {
-    // Skill 优先：查数类问题走后端 Skill（代码计算），不进大模型算数
+    // Skill 优先：查数/文案/客服统一走后端 Skill 流式接口（/agent/ask/stream），逐字输出
+    let reusedAssistantId: string | null = null
     if (looksLikeSkillQuery(content)) {
       try {
-        const res = await askAgentSkill(content)
+        const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
+        let acc = ''
+        const res = await askAgentSkillStream(content, {
+          onDelta: (chunk) => {
+            acc += chunk
+            void aiStore.updateChatMessage(assistantId, { content: acc })
+          },
+        })
         if (res.skill) {
-          await aiStore.addChatMessage({ role: 'assistant', content: `📊 ${res.answer}` })
+          await aiStore.updateChatMessage(assistantId, { content: `${skillIcon(res.skill)} ${res.answer}` })
           await scrollChatToBottom()
           return
         }
+        reusedAssistantId = assistantId
       } catch {
         /* skill 失败则回落到普通 LLM 对话 */
       }
@@ -119,7 +136,7 @@ const handleChatSend = async () => {
         content: m.content,
       }))
     )
-    const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
+    const assistantId = reusedAssistantId ?? (await aiStore.addChatMessage({ role: 'assistant', content: '' }))
     let acc = ''
     await chatAIStream(context, {
       max_tokens: aiStore.userConfig.maxTokens,

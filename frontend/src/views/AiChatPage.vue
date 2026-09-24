@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Close, Promotion, Setting, Delete } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
-import { askAgentSkill, looksLikeSkillQuery } from '@/utils/backendApi'
+import { askAgentSkillStream, looksLikeSkillQuery, skillIcon } from '@/utils/backendApi'
 import { useAIStore } from '@/stores/aiStore'
 
 const router = useRouter()
@@ -25,9 +25,11 @@ const chatMessages = computed(() => aiStore.chatMessages)
 
 const scrollToBottom = async () => {
   await nextTick()
-  const el = chatListRef.value
-  if (!el) return
-  el.scrollTop = el.scrollHeight
+  requestAnimationFrame(() => {
+    const el = chatListRef.value
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  })
 }
 
 watch(
@@ -68,21 +70,30 @@ const handleSend = async () => {
   chatInput.value = ''
 
   try {
-    // Skill 优先：查数类问题走后端 Skill（代码计算），不进大模型算数
+    // Skill 优先：查数/文案/客服统一走后端 Skill 流式接口（/agent/ask/stream），逐字输出
+    let reusedAssistantId: string | null = null
     if (looksLikeSkillQuery(content)) {
       try {
-        const res = await askAgentSkill(content)
+        const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
+        let acc = ''
+        const res = await askAgentSkillStream(content, {
+          onDelta: (chunk) => {
+            acc += chunk
+            void aiStore.updateChatMessage(assistantId, { content: acc })
+          },
+        })
         if (res.skill) {
-          await aiStore.addChatMessage({ role: 'assistant', content: `📊 ${res.answer}` })
+          await aiStore.updateChatMessage(assistantId, { content: `${skillIcon(res.skill)} ${res.answer}` })
           await scrollToBottom()
           return
         }
+        reusedAssistantId = assistantId
       } catch {
         /* skill 失败则回落到普通 LLM 对话 */
       }
     }
     const context = buildChatContext(aiStore.chatMessages.map((m) => ({ role: m.role, content: m.content })))
-    const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
+    const assistantId = reusedAssistantId ?? (await aiStore.addChatMessage({ role: 'assistant', content: '' }))
     let acc = ''
     await chatAIStream(context, {
       max_tokens: aiStore.userConfig.maxTokens,
