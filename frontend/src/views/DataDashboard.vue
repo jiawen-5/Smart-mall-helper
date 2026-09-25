@@ -188,9 +188,9 @@ onBeforeUnmount(() => { window.removeEventListener('resize', handleResize); tren
 </template>
 
 <style scoped>
-.dashboard { display: flex; flex-direction: column; gap: 20px; }
+.dashboard { display: flex; flex-direction: column; gap: 10px; }
 .hero { display: flex; justify-content: space-between; align-items: center; }
-.metric-card { min-height: 160px; display: flex; flex-direction: column; justify-content: space-between; }
+.metric-card { min-height: 100px; display: flex; flex-direction: column; justify-content: space-between; }
 .metric-value { font-size: 28px; font-weight: 700; }
 .metric-footer { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
 .chart { width: 100%; height: 320px; }

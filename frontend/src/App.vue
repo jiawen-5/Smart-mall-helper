@@ -94,7 +94,7 @@ const handleCreateTask = () => {
 .app-shell {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 10px;
 }
 
 .app-header {
