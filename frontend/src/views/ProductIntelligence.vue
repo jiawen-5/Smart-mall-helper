@@ -183,7 +183,7 @@ watch(() => [filterForm.keyword, filterForm.category], () => void loadProducts()
 
 <style scoped>
 .panel { margin-top: 0; }
-.product-page { display: flex; flex-direction: column; gap: 20px; }
+.product-page { display: flex; flex-direction: column; gap: 10px; }
 .filter-form { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px 24px; }
 .recommendation-panel { min-height: 260px; }
 .recommendation-list { display: flex; flex-direction: column; gap: 16px; }

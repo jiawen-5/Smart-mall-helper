@@ -117,7 +117,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', handleResize); beha
 </template>
 
 <style scoped>
-.insights-page { display: flex; flex-direction: column; gap: 20px; }
+.insights-page { display: flex; flex-direction: column; gap: 10px; }
 .hero { display: flex; justify-content: space-between; align-items: center; }
 .chart { width: 100%; height: 320px; }
 .chart.small { height: 260px; }

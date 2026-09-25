@@ -34,31 +34,31 @@
 
 ### 首页仪表盘
 
-![首页仪表盘](./test_pic/首页仪表盘页面.jpeg)
+![首页仪表盘](./test_pic/dashboard_home.jpeg)
 
 ### 商品智能分析
 
-![商品智能分析](./test_pic/商品智能分析页面.jpeg)
+![商品智能分析](./test_pic/product_analysis.jpeg)
 
 ### 用户洞察分析
 
-![用户分析](./test_pic/用户分析页面.jpeg)
+![用户分析](./test_pic/user_insight.jpeg)
 
 ### AI 运营助手
 
-![AI运营助手](./test_pic/ai运营助手页面.jpeg)
+![AI运营助手](./test_pic/ai_assistant.jpeg)
 
 ### AI 对话弹窗
 
-![AI对话弹窗](./test_pic/ai对话弹窗.png)
+![AI对话弹窗](./test_pic/ai_chat_pop.png)
 
 ### AI 对话全屏页
 
-![AI对话长截图](./test_pic/ai对话长截图.png)
+![AI对话长截图](./test_pic/ai_chat_long.png)
 
 ### 生成参数设置
 
-![生成参数](./test_pic/生成参数图片.png)
+![生成参数](./test_pic/param_setting.png)
 
 ---
 
