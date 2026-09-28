@@ -22,15 +22,17 @@ interface CallAIOptions {
 export type ChatRole = 'system' | 'user' | 'assistant'
 export type ChatMessage = { role: Exclude<ChatRole, 'system'>; content: string }
 
+import { selectByTokenBudget, CONTEXT_TOKEN_BUDGET } from './contextBudget'
+
 export const MAX_CHAT_CONTEXT_MESSAGES = 8
 
-export const buildChatContext = (messages: ChatMessage[], maxMessages = MAX_CHAT_CONTEXT_MESSAGES) => {
+export const buildChatContext = (messages: ChatMessage[], budget = CONTEXT_TOKEN_BUDGET) => {
   const trimmed = messages
     .map((m) => ({ role: m.role, content: (m.content || '').trim() }))
     .filter((m) => m.content.length > 0)
 
-  if (trimmed.length <= maxMessages) return trimmed
-  return trimmed.slice(-maxMessages)
+  // token 预算：从最新往前累加，超预算即停，不再固定 8 条
+  return selectByTokenBudget(trimmed, budget).kept
 }
 
 const DEFAULT_SYSTEM_PROMPT =

@@ -127,8 +127,41 @@ def template_answer(data: dict, question: str = "") -> str:
     return "\n".join(lines)
 
 
-async def llm_polish(question: str, data: dict) -> str | None:
-    """调用 DeepSeek 做语言整理；失败返回 None 由模板兜底。"""
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\uff00-\uffef]")
+_CONTEXT_BUDGET = 2000
+
+
+def _estimate_tokens(text: str) -> int:
+    s = text or ""
+    cjk = len(_CJK_RE.findall(s))
+    rest = _CJK_RE.sub(" ", s)
+    words = [w for w in re.split(r"[\s,，、；;|/\\？?！!：:。.\"'“”‘’（）()\[\]{}<>~`@#$%^&*+=_-]+", rest) if w]
+    en = sum(1 if re.search(r"[A-Za-z0-9]", w) else -(-len(w) // 4) for w in words)
+    return cjk * 2 + en
+
+
+def _trim_history(history: list[dict] | None, budget: int = _CONTEXT_BUDGET) -> list[dict]:
+    """token 预算裁剪：从最新往前累加，超预算即停，丢弃更早消息。"""
+    clean = [
+        {"role": h.get("role", "user"), "content": (h.get("content") or "").strip()}
+        for h in (history or [])
+        if isinstance(h, dict) and (h.get("content") or "").strip()
+    ]
+    kept: list[dict] = []
+    used = 0
+    for h in reversed(clean):
+        cost = _estimate_tokens(h["content"]) + 4
+        if kept and used + cost > budget:
+            break
+        kept.insert(0, h)
+        used += cost
+        if used >= budget:
+            break
+    return kept
+
+
+async def llm_polish(question: str, data: dict, history: list[dict] | None = None) -> str | None:
+    """调用 DeepSeek 做语言整理；失败返回 None 由模板兜底。history 已按 token 预算裁剪。"""
     if not settings.deepseek_api_key:
         return None
     concise_rule = (
@@ -146,6 +179,10 @@ async def llm_polish(question: str, data: dict) -> str | None:
         f"{concise_rule}不要输出JSON。"
     )
     try:
+        hist_msgs = [
+            {"role": h["role"] if h["role"] in ("user", "assistant") else "user", "content": h["content"][:800]}
+            for h in _trim_history(history)
+        ]
         async with httpx.AsyncClient(timeout=25) as c:
             r = await c.post(
                 settings.deepseek_api_url,
@@ -155,6 +192,7 @@ async def llm_polish(question: str, data: dict) -> str | None:
                     "temperature": 0.3,
                     "messages": [
                         {"role": "system", "content": sys},
+                        *hist_msgs,
                         {"role": "user", "content": f"问题：{question}\n<DATA>{data}</DATA>"},
                     ],
                 },
@@ -274,8 +312,9 @@ async def ask_stream(body: AskIn, db: Session = Depends(get_db)):
 
 async def _build_answer(body: "AskIn", db: Session) -> tuple:
     """统一构建 Skill 回答：返回 (skill_name, answer, data)，供 /ask 与 /ask/stream 共用。"""
-    question = _rewrite_with_history(body.question, body.history)
-    body = body.model_copy(update={"question": question}) if hasattr(body, "model_copy") else body
+    trimmed_history = _trim_history(body.history)
+    question = _rewrite_with_history(body.question, trimmed_history)
+    body = body.model_copy(update={"question": question, "history": trimmed_history}) if hasattr(body, "model_copy") else body
     for s in SKILLS:
         if not s["matcher"](body.question):
             continue
@@ -288,7 +327,7 @@ async def _build_answer(body: "AskIn", db: Session) -> tuple:
             if concise:
                 # 用户明确只要一个数：直接返回模板结果，不经过 LLM，防止加戏
                 return (s["name"], template_answer(data, body.question), data)
-            polished = await llm_polish(body.question, data)
+            polished = await llm_polish(body.question, data, trimmed_history)
             return (s["name"], polished or template_answer(data, body.question), data)
 
         # 文案 / 客服类（polish=False）：Skill 自己已产出最终话术，代码整理即可，不再多花一次 LLM

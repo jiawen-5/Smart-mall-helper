@@ -54,16 +54,25 @@ export const askAgentSkill = (question: string, platform?: string) =>
 /** Skill 流式调用：走 /agent/ask/stream（SSE），文案/客服/查数统一逐字输出 */
 export const askAgentSkillStream = async (
   question: string,
-  opts: { platform?: string; history?: { role: string; content: string }[]; onDelta: (chunk: string) => void; onSkill?: (skill: string | null) => void }
+  opts: { platform?: string; history?: { role: string; content: string }[]; budget?: number; onDelta: (chunk: string) => void; onSkill?: (skill: string | null) => void }
 ): Promise<{ skill: string | null; answer: string; data: unknown }> => {
   const orderMatch = question.match(/(?:订单号|订单|order[_ ]?id)\s*[:：]?\s*([A-Za-z0-9\-_]{6,40})/i)
+  // skill 上下文同样走 token 预算：从最新往前累加，超预算丢弃更早消息
+  const budget = opts.budget ?? 2000
+  const { selectByTokenBudget: _select } = await import('./contextBudget')
+  const history = _select(
+    (opts.history || [])
+      .map((m) => ({ role: m.role, content: (m.content || '').trim() }))
+      .filter((m) => m.content.length > 0),
+    budget,
+  ).kept
   const resp = await fetch('/api/agent/ask/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       question,
       platform: opts.platform || undefined,
-      history: (opts.history || []).slice(-6),
+      history,
       order_id: orderMatch ? orderMatch[1] : undefined,
     }),
   })

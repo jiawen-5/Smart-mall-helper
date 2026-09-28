@@ -4,7 +4,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Close, Promotion, Setting, Delete } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
-import { askAgentSkillStream, looksLikeSkillQuery, skillIcon } from '@/utils/backendApi'
+import { askAgentSkillStream, skillIcon } from '@/utils/backendApi'
+import { selectByTokenBudget, CONTEXT_TOKEN_BUDGET } from '@/utils/contextBudget'
 import { useAIStore } from '@/stores/aiStore'
 import { createStreamBuffer } from '@/utils/streamBuffer'
 import { isNearBottom } from '@/utils/markdownSafe'
@@ -26,6 +27,14 @@ const maxTokens = ref(aiStore.userConfig.maxTokens)
 const temperature = ref(aiStore.userConfig.temperature)
 
 const chatMessages = computed(() => aiStore.chatMessages)
+
+// token 预算内实际会带上的上下文（与 buildChatContext 同口径，不再固定 8 条）
+const contextInfo = computed(() => {
+  const all = chatMessages.value.map((m) => ({ role: m.role, content: m.content || '' }))
+  const { kept, usedTokens } = selectByTokenBudget(all, CONTEXT_TOKEN_BUDGET)
+  void kept
+  return { count: all.length, usedTokens }
+})
 
 const scrollToBottom = async (force = false) => {
   await nextTick()
@@ -100,7 +109,8 @@ const handleSend = async () => {
         aiStore.patchChatMessageContent(assistantId, text)
         void scrollToBottom()
       })
-      const history = aiStore.chatMessages.slice(-7, -1).map((m) => ({ role: m.role, content: m.content }))
+      // 注意：此时 chatMessages 尾部是 [本轮 user, 占位 assistant]，都要排除，只取更早的消息
+      const history = aiStore.chatMessages.slice(0, -2).map((m) => ({ role: m.role, content: m.content }))
       const res = await askAgentSkillStream(content, {
         history,
         onDelta: (chunk) => buf.push(chunk),
@@ -146,7 +156,7 @@ const handleSend = async () => {
       <div>
         <div class="page-title">AI 对话</div>
         <div class="page-subtitle">
-          和弹窗共用同一份对话记录（{{ chatMessages.length === 0 ? '就绪' : `上下文 ${Math.min(chatMessages.length, 8)} 条` }}），在这里可以宽屏长文追问
+          和弹窗共用同一份对话记录，在这里可以宽屏长文追问
         </div>
       </div>
       <div class="hero-actions">

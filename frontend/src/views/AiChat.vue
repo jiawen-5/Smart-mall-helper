@@ -4,7 +4,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close, FullScreen, Promotion, Setting } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
-import { askAgentSkillStream, looksLikeSkillQuery, skillIcon } from '@/utils/backendApi'
+import { askAgentSkillStream, skillIcon } from '@/utils/backendApi'
+import { selectByTokenBudget, CONTEXT_TOKEN_BUDGET } from '@/utils/contextBudget'
 import { createStreamBuffer } from '@/utils/streamBuffer'
 import { isNearBottom } from '@/utils/markdownSafe'
 import { statusLabel } from '@/utils/chatStatus'
@@ -62,6 +63,14 @@ const applySettings = async () => {
 }
 
 const chatMessages = computed(() => props.messages ?? aiStore.chatMessages)
+
+// token 预算内实际会带上的上下文（与 buildChatContext 同口径，不再固定 8 条）
+const contextInfo = computed(() => {
+  const all = chatMessages.value.map((m) => ({ role: m.role, content: m.content || '' }))
+  const { kept, usedTokens } = selectByTokenBudget(all, CONTEXT_TOKEN_BUDGET)
+  void kept
+  return { count: all.length, usedTokens }
+})
 
 const scrollChatToBottom = async (force = false) => {
   // 滚动锚定：非强制时只有用户贴底才跟随，防止阅读历史时抖动
@@ -138,7 +147,8 @@ const handleChatSend = async () => {
         aiStore.patchChatMessageContent(assistantId, text)
         void scrollChatToBottom()
       })
-      const history = aiStore.chatMessages.slice(-7, -1).map((m) => ({ role: m.role, content: m.content }))
+      // 注意：此时 chatMessages 尾部是 [本轮 user, 占位 assistant]，都要排除，只取更早的消息
+      const history = aiStore.chatMessages.slice(0, -2).map((m) => ({ role: m.role, content: m.content }))
       const res = await askAgentSkillStream(content, {
         history,
         onDelta: (chunk) => buf.push(chunk),
@@ -216,9 +226,7 @@ defineExpose({ openChat, closeChat, sendMessage })
           <el-button :icon="Close" circle text @click="closeChat" />
         </div>
       </div>
-      <div class="chat-float-subtitle">基于当前运营场景持续追问和改写（{{
-        chatMessages.length === 0 ? '就绪' : `上下文 ${Math.min(chatMessages.length, 8)} 条`
-      }}）</div>
+      <div class="chat-float-subtitle">基于当前运营场景持续追问和改写</div>
     </div>
     <div ref="chatListRef" class="chat-float-body" @scroll="onChatScroll">
       <div v-if="chatMessages.length === 0" class="chat-float-empty">
