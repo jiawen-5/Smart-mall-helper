@@ -17,10 +17,19 @@ type AIStoreState = {
   hydrated: boolean
   loading: boolean
   chatStatus: ChatStatus
+  /** 游标分页：已加载中最早一条的 createdAt；null 表示还没有可用的游标 */
+  chatCursor: number | null
+  /** 是否还有更早的历史可加载 */
+  chatHasMore: boolean
+  /** 顶部加载更多进行中 */
+  chatLoadingMore: boolean
 }
 
 const MAX_HISTORY = 30
-const MAX_CHAT_MESSAGES = 50
+/** 单页大小：按时间倒序每次只查 20 条 */
+export const CHAT_PAGE_SIZE = 20
+/** 内存中最多保留的消息数（分页加载的上界，防止无限增长） */
+const MAX_CHAT_MESSAGES = 200
 
 export const useAIStore = defineStore('ai', {
   state: (): AIStoreState => ({
@@ -30,6 +39,9 @@ export const useAIStore = defineStore('ai', {
     hydrated: false,
     loading: false,
     chatStatus: 'idle',
+    chatCursor: null,
+    chatHasMore: true,
+    chatLoadingMore: false,
   }),
   getters: {
     recentHistory: (state) => state.history.slice(0, 10),
@@ -48,18 +60,50 @@ export const useAIStore = defineStore('ai', {
       try {
         await migrateLegacyStorageIfNeeded()
 
-        const [history, chatMessages, configRecord] = await Promise.all([
+        const [history, latestChats, totalChats, configRecord] = await Promise.all([
           aiDb.histories.orderBy('createdAt').reverse().toArray(),
-          aiDb.chatMessages.orderBy('createdAt').toArray(),
+          // 首屏只查最近 20 条（倒序游标分页第一页）
+          aiDb.chatMessages.orderBy('createdAt').reverse().limit(CHAT_PAGE_SIZE).toArray(),
+          aiDb.chatMessages.count(),
           aiDb.settings.get('userConfig'),
         ])
 
         this.history = history.slice(0, MAX_HISTORY)
-        this.chatMessages = chatMessages.slice(-MAX_CHAT_MESSAGES)
+        // reverse() 拿回来是倒序，转回正序用于渲染
+        this.chatMessages = latestChats.reverse()
+        this.chatCursor = this.chatMessages.length > 0 ? this.chatMessages[0]!.createdAt : null
+        this.chatHasMore = totalChats > this.chatMessages.length
         this.userConfig = configRecord?.value ?? DEFAULT_USER_CONFIG
         this.hydrated = true
       } finally {
         this.loading = false
+      }
+    },
+    /** 滚动到顶部时调用：用游标继续向前读下一页（20 条），返回新增条数 */
+    async loadOlderChatMessages() {
+      if (!this.hydrated || this.chatLoadingMore || !this.chatHasMore || this.chatCursor == null) return 0
+      this.chatLoadingMore = true
+      try {
+        const total = await aiDb.chatMessages.count()
+        // 同毫秒 createdAt 可能重复，游标处多取 1 条做去重
+        const rows = await aiDb.chatMessages
+          .where('createdAt')
+          .below(this.chatCursor)
+          .reverse()
+          .limit(CHAT_PAGE_SIZE + 1)
+          .toArray()
+        const existed = new Set(this.chatMessages.map((m) => m.id))
+        const fresh = rows.reverse().filter((m) => !existed.has(m.id))
+        if (fresh.length > 0) {
+          this.chatMessages = [...fresh, ...this.chatMessages].slice(-MAX_CHAT_MESSAGES)
+          this.chatCursor = this.chatMessages[0]!.createdAt
+        }
+        this.chatHasMore = total > this.chatMessages.length && rows.length > CHAT_PAGE_SIZE - 1 && fresh.length > 0
+        // 边界：如果库里总数已全量加载，直接关门
+        if (total <= this.chatMessages.length) this.chatHasMore = false
+        return fresh.length
+      } finally {
+        this.chatLoadingMore = false
       }
     },
     async addHistory(partial: Omit<AIHistoryItem, 'id' | 'createdAt'>) {
@@ -89,6 +133,8 @@ export const useAIStore = defineStore('ai', {
     },
     async clearChat() {
       this.chatMessages = []
+      this.chatCursor = null
+      this.chatHasMore = false
       await aiDb.chatMessages.clear()
     },
     // 流式高频更新：只改内存，不写 IndexedDB，结束时再 persistChatMessage 一次落盘

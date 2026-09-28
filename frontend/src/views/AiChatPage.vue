@@ -6,11 +6,10 @@ import { Close, Promotion, Setting, Delete } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
 import { askAgentSkillStream, skillIcon } from '@/utils/backendApi'
 import { selectByTokenBudget, CONTEXT_TOKEN_BUDGET } from '@/utils/contextBudget'
+import VirtualChatList from '@/components/VirtualChatList.vue'
 import { useAIStore } from '@/stores/aiStore'
 import { createStreamBuffer } from '@/utils/streamBuffer'
-import { isNearBottom } from '@/utils/markdownSafe'
 import { statusLabel } from '@/utils/chatStatus'
-import MarkdownRender from '@/components/MarkdownRender.vue'
 
 const router = useRouter()
 const aiStore = useAIStore()
@@ -20,7 +19,6 @@ const exitChatPage = () => {
 }
 const chatInput = ref('')
 const chatSending = ref(false)
-const chatListRef = ref<HTMLElement | null>(null)
 const settingsVisible = ref(false)
 
 const maxTokens = ref(aiStore.userConfig.maxTokens)
@@ -37,23 +35,24 @@ const contextInfo = computed(() => {
 })
 
 const scrollToBottom = async (force = false) => {
-  await nextTick()
-  const el = chatListRef.value
-  if (!el) return
-  if (!force && !isNearBottom(el)) {
-    showBackToBottom.value = true
-    return
-  }
-  showBackToBottom.value = false
-  requestAnimationFrame(() => {
-    el.scrollTop = el.scrollHeight
-  })
+  await listRef.value?.scrollToBottom(force)
 }
 
-const onChatScroll = () => {
-  const el = chatListRef.value
-  if (!el) return
-  showBackToBottom.value = !isNearBottom(el)
+const onStickChange = (sticking: boolean) => {
+  showBackToBottom.value = !sticking
+}
+
+const listRef = ref<{ scrollToBottom: (force?: boolean) => Promise<void>; scrollElement?: unknown } | null>(null)
+
+// 顶部加载更多：游标分页向前读 20 条，并补偿 scrollHeight 防止跳动
+const handleLoadMore = async () => {
+  const el = listRef.value?.scrollElement as HTMLElement | undefined
+  const prevHeight = el?.scrollHeight ?? 0
+  const added = await aiStore.loadOlderChatMessages()
+  if (added > 0 && el) {
+    await nextTick()
+    el.scrollTop += el.scrollHeight - prevHeight
+  }
 }
 
 const showBackToBottom = ref(false)
@@ -67,7 +66,7 @@ onMounted(async () => {
   await aiStore.ensureHydrated().catch(() => {})
   maxTokens.value = aiStore.userConfig.maxTokens
   temperature.value = aiStore.userConfig.temperature
-  void scrollToBottom()
+  void scrollToBottom(true)
 })
 
 const openSettings = () => {
@@ -169,22 +168,22 @@ const handleSend = async () => {
     </section>
 
     <section class="panel chat-main">
-      <div ref="chatListRef" class="chat-body" @scroll="onChatScroll">
-        <div v-if="chatMessages.length === 0" class="chat-empty">
+      <VirtualChatList
+        ref="listRef"
+        body-class="chat-body virtual-body"
+        :messages="chatMessages"
+        :typing-text="chatSending ? (statusLabel(aiStore.chatStatus) || '正在生成…') : null"
+        :has-more="aiStore.chatHasMore"
+        :loading-more="aiStore.chatLoadingMore"
+        @load-more="handleLoadMore"
+        @stick-change="onStickChange"
+      >
+        <template #empty>
           <div class="chat-empty-title">开始和运营专家聊聊</div>
           <div class="chat-empty-desc">可以把运营助手里的标题 / 文案复制过来，让我给你多几个版本，或针对平台规则再优化。</div>
-        </div>
-        <div v-for="m in chatMessages" :key="m.id" class="chat-msg" :class="m.role">
-          <div class="chat-bubble">
-            <MarkdownRender v-if="m.role === 'assistant'" :content="m.content" />
-            <div v-else class="chat-text">{{ m.content }}</div>
-          </div>
-        </div>
-        <div v-if="chatSending" class="chat-msg assistant">
-          <div class="chat-bubble"><span class="chat-typing">{{ statusLabel(aiStore.chatStatus) || '正在生成…' }}</span></div>
-        </div>
-        <el-button v-if="showBackToBottom" class="back-bottom" size="small" round @click="scrollToBottom(true)">回到底部</el-button>
-      </div>
+        </template>
+      </VirtualChatList>
+      <el-button v-if="showBackToBottom" class="back-bottom-float" size="small" round @click="scrollToBottom(true)">回到底部</el-button>
       <div class="chat-input">
         <el-input
           v-model="chatInput"
@@ -222,7 +221,9 @@ const handleSend = async () => {
 .hero-actions { display: flex; gap: 8px; }
 .chat-main { display: flex; flex-direction: column; min-height: 560px; max-height: calc(100vh - 320px); overflow: hidden; }
 .chat-body { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 16px 4px; position: relative; }
-.back-bottom { position: sticky; bottom: 8px; align-self: center; }
+.virtual-body { display: block; }
+.back-bottom-float { position: absolute; left: 50%; bottom: 90px; transform: translateX(-50%); z-index: 5; box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18); }
+.chat-main { position: relative; }
 .chat-empty { margin: auto; text-align: center; color: var(--text-muted); }
 .chat-empty-title { font-size: 16px; font-weight: 600; color: #0f172a; margin-bottom: 6px; }
 .chat-msg { display: flex; }

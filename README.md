@@ -15,8 +15,13 @@
 ## 📝 最近更新
 
 <details>
-<summary><strong>查看版本更新记录（最新：2026-06-16）</strong></summary>
+<summary><strong>查看版本更新记录（最新：2026-09-29）</strong></summary>
 
+- `2026-09-29`
+  - **对话渲染性能重构**：新增消息有限状态机（`thinking / tool_calling / answering / error`）、chunk 缓冲队列 + `requestAnimationFrame` 批量提交、TanStack Virtual 虚拟滚动 + IndexedDB 游标分页（每页 20 条）、Markdown 流式补全与滚动锚定。
+  - **安全加固**：AI 输出统一经 `markdown-it(html:false)` + DOMPurify 白名单净化后再渲染，防御 XSS。
+  - **上下文预算化**：废弃「固定 8 条消息」，改为按 token 预算（2000）从最新往前累加裁剪，普通对话与 Skill 流式接口共用同一套策略。
+  - **Skill 路由与多轮增强**：前端不再做关键词前置拦截，所有问题统一交后端路由；新增历史指代改写（「短一点」「它呢」）、品类查询匹配（「母婴类产品卖得好吗」按品类聚合排序）、非 Skill 问题回落普通 LLM 对话。
 - `2026-06-16`
   - **三 Skill 贯通**：文案创意生成（Skill 2）与客服回复（Skill 3）接入 Agent 分派层。`agent.py` 支持同步/异步 Skill 混合调度、按签名透传参数、并新增 `/api/agent/ask/stream` 流式输出。
   - **文案合规**：广告法极限词扫描与整改（`compliance.py`）覆盖「绝对化、排名、唯一性、首创、保证、铁价、贬低竞品」等类别；客服输出统一过敏感词过滤。
@@ -73,6 +78,11 @@
 - 🛡️ **敏感词过滤**：客服话术输出前统一过敏感词规则库
 - 🎛️ **可控生成参数**：最大字数、Temperature 可调，文案支持「只给标题 / 只给卖点 / 只给口播」精细控制
 - 📦 **多端对话**：AI 对话弹窗与全屏页共用一份历史记录，支持继续追问
+- ⚡ **流式渲染不掉帧**：消息状态机（思考中 / 调用工具 / 生成中）+ chunk 缓冲队列按帧批量提交，流式回复不再逐字触发重渲染
+- 🧵 **虚拟滚动 + 游标分页**：长会话只渲染视口内几条 DOM，历史消息按时间倒序每页 20 条从 IndexedDB 游标续读
+- 🧮 **Token 预算上下文**：对话上下文按 2000 token 预算动态取舍（中文 1 字≈2 token），而非固定消息条数
+- 🧷 **Markdown 流式友好**：未闭合代码块 / 加粗 / 表格自动补全，贴底才自动跟随、否则手动回到底部，消除布局抖动
+- 🔒 **输出净化**：AI 返回的富文本经 DOMPurify 白名单净化后渲染，防御 XSS 注入
 
 ---
 
@@ -84,7 +94,9 @@
 - 数据库：MySQL（真实电商业务数据）
 - LLM：DeepSeek（OpenAI 兼容接口）
 - 前端：Vue 3 + Vite + Element Plus + ECharts + Pinia
-- 本地存储：IndexedDB（Dexie，会话与历史）
+- 本地存储：IndexedDB（Dexie，会话与历史，游标分页读取）
+- 长列表：TanStack Virtual（虚拟滚动，动态行高测量）
+- 富文本渲染：markdown-it + DOMPurify（流式补全 + XSS 净化）
 
 ### 核心架构分层
 
@@ -92,8 +104,13 @@
 | :--- | :--- | :--- |
 | 前端 | `frontend/src/views/*.vue` | 仪表盘、商品、用户、运营助手、AI 对话展示与交互 |
 | UI 框架 | `frontend/src/App.vue` | 顶栏导航、全屏对话页隐藏导航 |
-| 调用层 | `frontend/src/utils/backendApi.ts` | 后端接口统一封装 + Skill 意图判断 |
-| Agent 接口层 | `backend/app/routers/agent.py` | 意图识别路由、Skill 分派、LLM 整理与流式输出 |
+| 虚拟列表 | `frontend/src/components/VirtualChatList.vue` | 消息虚拟滚动、滚动锚定、顶部触发游标加载 |
+| 流式渲染 | `frontend/src/utils/streamBuffer.ts` | chunk 缓冲队列 + rAF/超时兜底批量提交 |
+| 上下文裁剪 | `frontend/src/utils/contextBudget.ts` | token 估算与预算内消息筛选（前后端同口径） |
+| 状态机 | `frontend/src/utils/chatStatus.ts` | 消息状态定义与合法转移 |
+| 安全渲染 | `frontend/src/utils/markdownSafe.ts` | 流式 Markdown 补全 + 白名单净化 |
+| 调用层 | `frontend/src/utils/backendApi.ts` | 后端接口统一封装、历史透传与订单号提取 |
+| Agent 接口层 | `backend/app/routers/agent.py` | 意图识别路由、历史改写、上下文裁剪、Skill 分派、LLM 整理与流式输出 |
 | 业务路由层 | `backend/app/routers/` | dashboard / products / users / orders / meta |
 | Skill 层 | `backend/app/skills/` | 三个 Skill + 共用规则引擎 + LLM 封装 |
 | ORM 模型 | `backend/app/models.py` | 映射 MySQL 真实电商表 |
@@ -199,11 +216,70 @@ flowchart TD
     class QA_Faq,QA_Llm,OK,Polish,Calc out;
 ```
 
+## ⚡ AI 对话渲染与上下文优化
+
+AI 对话是高频交互场景，本项目针对「流式输出卡顿、长会话卡死、上下文失控、XSS 风险」四类问题做了成体系的优化。
+
+### 1. 消息有限状态机
+
+消息生命周期统一由状态机驱动，非法转移自动忽略，避免「菊花转到底」的假等待：
+
+```text
+idle → thinking → tool_calling → answering → idle
+                     ↘ error ↗
+```
+
+- 普通对话：`thinking → answering`（两态退化）；
+- 命中 Skill：`thinking → tool_calling → answering`，「调用工具」阶段显式提示「正在查询业务数据…」，把 Skill 查询空窗期可视化；
+- 异常走 `error`，`finally` 强制回 `idle`，杜绝状态卡死。
+
+### 2. chunk 缓冲队列 + requestAnimationFrame 批量提交
+
+SSE 高频 `onDelta` 只做入队，`rAF` 每帧最多提交一次 state：
+
+```text
+onDelta → queue → requestAnimationFrame → flush → 单次 state 更新
+```
+
+- 流式期间只改内存（`patchChatMessageContent`），**不写 IndexedDB**，流结束才落盘一次；
+- 后台标签页 `rAF` 被挂起时自动降级为 `setTimeout(50ms)` 兜底；
+- 效果：Pinia 更新频率从「每秒数十次」降到「≤60fps」。
+
+### 3. 虚拟滚动 + IndexedDB 游标分页
+
+- **分页**：`chatMessages` 按 `createdAt` 倒序建索引，首屏只查最新 20 条；滚动到顶部时以 `cursor = 已加载最早一条 createdAt` 继续向前读下一页（多取 1 条做同毫秒去重），内存上限 200 条。
+- **虚拟滚动**：TanStack Virtual 只渲染视口内 + `overscan 6` 条 DOM；Markdown 气泡高度不定，使用 `measureElement` 动态测量而非写死行高。
+- **加载体验**：顶部加载后按 `scrollHeight` 差值补偿 `scrollTop`，避免向前翻页时视口跳动；打开对话自动钉底到最新消息。
+
+### 4. Markdown 流式渲染优化
+
+- **自动补全**：流式中未闭合的 ```` ``` ````、`**`、行内代码、表格尾管自动补齐，避免半截语法导致整段内容消失 / 闪烁。
+- **滚动锚定**：仅当用户贴底（80px 内）时自动跟随最新内容，回看历史时不被强行拽回，改为展示「回到底部」按钮。
+
+### 5. 输出净化防 XSS
+
+AI 输出视为不可信输入，统一走 `markdown-it（html: false）→ DOMPurify 白名单净化` 后才 `v-html` 渲染，剥离 `script / img / on*` 事件等危险节点，`table / code / pre / a` 等正常排版标签保留。
+
+### 6. Token 预算上下文
+
+不再固定截取最近 N 条消息，改为 **token 预算制**（简易估算：中文 1 字 ≈ 2 token，英文 1 词 ≈ 1 token，单条含 4 token 开销）：
+
+```text
+从最新消息向前累加 → 超过 2000 token 预算即停 → 丢弃更早的消息
+（单条自身超预算时，二分截断仅保留尾部可用部分）
+```
+
+- 普通对话（`/api/ai/chat-stream`）与 Skill 流式接口（`/api/agent/ask/stream`）**共用同一套裁剪策略**，前端先裁、后端按同口径二次裁剪防伪造；
+- 短消息多带、长回复少带，比固定条数更贴合真实请求成本；
+- 对话页实时显示「上下文 N 条 · 约 X token / 2000」，便于观测。
+
+---
+
 ## 防幻觉设计
 
 这是本项目最核心的设计取舍：**数值与合规由代码保证，大模型只负责语言表达**。
 
-- **查数 Skill（防数字幻觉）**：目标商品由 ID 精确匹配或名称/品牌/品类模糊匹配到 `product` 表；销量、GMV、订单数来自 `order_item ⨝ order` 聚合，转化率 = 订单数 / 浏览 PV，环比 = 与上一等长周期对比，同比 = 与去年同期对比——全部 Python 计算，禁止 LLM 改动数字。
+- **查数 Skill（防数字幻觉）**：目标商品由 ID 精确匹配 → 品类匹配（「母婴类产品」按 `category/subcategory` 聚合）→ 名称/品牌/品类模糊匹配逐级兜底；销量、GMV、订单数来自 `order_item ⨝ order` 聚合，转化率 = 订单数 / 浏览 PV，环比 = 与上一等长周期对比，同比 = 与去年同期对比——全部 Python 计算，禁止 LLM 改动数字；未匹配到具体商品时才回落平台 / 全站汇总。
 - **文案 Skill（防合规疏漏）**：商品属性从数据库取，不让 LLM 编；生成的标题/卖点/口播先过广告法极限词规则引擎，命中即附整改版，不依赖大模型自我审查。
 - **客服 Skill（防话术失控）**：先从本地 FAQ 标准答案库作答；走 LLM 时注入订单真实状态与商品信息，并约束「只使用上下文中的真实数据」，输出前统一过滤敏感词与极限词。
 
@@ -246,10 +322,16 @@ flowchart TD
 │   │   │   ├── AiChat.vue            # AI 对话悬浮弹窗
 │   │   │   └── AiChatPage.vue        # AI 对话全屏页
 │   │   ├── components/ThinkingBox.vue # 深度思考折叠框（已回滚停用）
+│   │   ├── components/VirtualChatList.vue # 消息虚拟滚动列表
+│   │   ├── components/MarkdownRender.vue  # 流式 Markdown 渲染（补全 + 净化）
 │   │   ├── utils/
-│   │   │   ├── backendApi.ts         # 后端调用层 + Skill 意图判断
-│   │   │   └── aiApi.ts              # DeepSeek 流式调用
-│   │   ├── stores/                   # Pinia + IndexedDB 会话记忆
+│   │   │   ├── backendApi.ts         # 后端调用层 + 历史透传 + 订单号提取
+│   │   │   ├── aiApi.ts              # DeepSeek 流式调用 + 上下文构建
+│   │   │   ├── contextBudget.ts      # token 估算与预算裁剪
+│   │   │   ├── streamBuffer.ts       # chunk 缓冲队列 + rAF 批量提交
+│   │   │   ├── chatStatus.ts         # 消息状态机定义与转移规则
+│   │   │   └── markdownSafe.ts       # 流式补全 + 净化白名单 + 滚动判定
+│   │   ├── stores/                   # Pinia + IndexedDB 会话记忆（游标分页）
 │   │   ├── router/index.ts           # 前端路由
 │   │   └── App.vue
 │   ├── package.json
@@ -267,9 +349,9 @@ flowchart TD
 **后端**
 
 - `backend/app/routers/agent.py`
-  Agent 路由层：意图识别分发、Skill 同步/异步混合调度、按签名透传参数、查数类 LLM 整理、文案/客服类代码整理，以及 `/ask/stream` 流式输出。
+  Agent 路由层：历史指代改写、token 预算上下文裁剪、意图识别分发、Skill 同步/异步混合调度、按签名透传参数、查数类 LLM 整理、文案/客服类代码整理，以及 `/ask/stream` 流式输出；未命中 Skill 时返回空结果交由前端走普通对话。
 - `backend/app/skills/product_metrics.py`
-  Skill 1 查数：商品 ID / 名称 / 品牌解析、时间范围解析（今天 / 近 N 天 / 明确日期区间）、销量 / GMV / 转化率 / 环比 / 同比计算。
+  Skill 1 查数：商品 ID / 品类 / 名称 / 品牌逐级解析、时间范围解析（今天 / 近 N 天 / 明确日期区间）、销量 / GMV / 转化率 / 环比 / 同比计算，品类查询按 GMV 降序并给出销量最高款结论。
 - `backend/app/skills/copywriting.py`
   Skill 2 文案：商品上下文提取、风格（简约/种草/直播风）与长度解析、LLM 草稿 + 极限词校验 + 多版本整理。
 - `backend/app/skills/customer_service.py`
@@ -284,13 +366,19 @@ flowchart TD
 **前端**
 
 - `frontend/src/utils/backendApi.ts`
-  所有后端接口封装 + `looksLikeSkillQuery` 意图判断 + Skill 2/3 直接调用方法。
+  所有后端接口封装 + Skill 流式调用（自动携带裁剪后的历史与订单号）+ Skill 2/3 直接调用方法。
+- `frontend/src/utils/contextBudget.ts`
+  token 估算与预算筛选：从最新消息向前累加，超预算即停，前后端同口径。
+- `frontend/src/utils/streamBuffer.ts`
+  chunk 缓冲队列：`rAF` 每帧批量提交，后台标签页降级 `setTimeout` 兜底。
+- `frontend/src/components/VirtualChatList.vue`
+  消息虚拟列表：动态行高测量、滚动锚定、打开自动钉底、顶部触发游标加载。
 - `frontend/src/views/DataDashboard.vue`
   仪表盘：KPI、趋势图、订单状态分布与履约健康度，随 7/15/30 天切换联动。
 - `frontend/src/views/AiOperationAssistant.vue`
   运营助手：标题优化 / 文案生成 / 客服话术三个工具 + 浮动对话与「猜你想问」。
 - `frontend/src/views/AiChat.vue` / `AiChatPage.vue`
-  AI 对话弹窗与全屏页，共用一份历史记录，支持 Skill 优先应答。
+  AI 对话弹窗与全屏页，共用一份历史记录与同一套流式渲染管线（状态机 + 缓冲 + 虚拟滚动 + 上下文预算）。
 
 ---
 
