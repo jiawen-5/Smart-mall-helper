@@ -141,6 +141,7 @@ async def llm_polish(question: str, data: dict) -> str | None:
         "你是电商数据分析助手。请把 <DATA> 中的结构化指标整理成简洁中文回答："
         "若 DATA 有 total 字段（平台/全站汇总），直接报总销售额和总订单数及环比；"
         "若有 items 数组，保留每个商品的销量/GMV/订单数/转化率/环比数字，原样引用；"
+        "若 matched_by=category，开头先点评该品类整体表现（共 N 款、合计 GMV），再按 GMV 降序列出商品，最后明确指出销量/GMV 最高的是一款；"
         "不得编造、不得四舍五入改动任何数字；null 值就说暂无对比数据；"
         f"{concise_rule}不要输出JSON。"
     )
@@ -273,6 +274,8 @@ async def ask_stream(body: AskIn, db: Session = Depends(get_db)):
 
 async def _build_answer(body: "AskIn", db: Session) -> tuple:
     """统一构建 Skill 回答：返回 (skill_name, answer, data)，供 /ask 与 /ask/stream 共用。"""
+    question = _rewrite_with_history(body.question, body.history)
+    body = body.model_copy(update={"question": question}) if hasattr(body, "model_copy") else body
     for s in SKILLS:
         if not s["matcher"](body.question):
             continue
@@ -295,11 +298,30 @@ async def _build_answer(body: "AskIn", db: Session) -> tuple:
             answer = format_customer_service_answer(data)
         return (s["name"], answer, data)
 
-    # 非 skill 问题：返回全站概况
-    sales = db.query(func.coalesce(func.sum(models.Order.total_amount), 0)).scalar() or 0
-    orders = db.query(func.count(models.Order.order_id)).scalar() or 0
-    answer = f"当前共 {orders} 笔订单，累计 GMV ¥{float(sales):,.2f}。（问题：{body.question}）"
-    return (None, answer, {"orders": orders, "gmv": float(sales)})
+    # 非 skill 问题：不编造汇总数字，返回空 answer 让前端走普通 LLM 对话
+    # （原来这里直接拼全站 GMV，会把闲聊也变成“当前共 N 笔订单”，体验差）
+    return (None, "", {"routed": "chitchat"})
+
+
+def _rewrite_with_history(question: str, history: list[dict] | None) -> str:
+    """多轮指代改写：“它呢？”“短一点”“再来一个”这类短问，拼上上一轮用户问题再做意图识别。"""
+    q = (question or "").strip()
+    if not history or len(q) >= 12:
+        return question
+    last_user = ""
+    for h in reversed(history):
+        if isinstance(h, dict) and h.get("role") == "user" and (h.get("content") or "").strip():
+            last_user = h["content"].strip()[-120:]
+            break
+    if not last_user or last_user == q:
+        return question
+    # 改写型（短一点/再来一个/换一批）：保留上轮主题
+    if re.search(r"(短一|长一|再来|换一|换批|多来|继续|还有)", q):
+        return f"{last_user}（{q}）"
+    # 指代型（它/那款/这个怎么样）：拼上主题做匹配
+    if re.search(r"(它|那|这|其)", q):
+        return f"{last_user} {q}"
+    return question
 
 
 @router.get("/skill/product-metrics")

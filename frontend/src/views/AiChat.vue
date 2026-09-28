@@ -5,6 +5,10 @@ import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close, FullScreen, Promotion, Setting } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
 import { askAgentSkillStream, looksLikeSkillQuery, skillIcon } from '@/utils/backendApi'
+import { createStreamBuffer } from '@/utils/streamBuffer'
+import { isNearBottom } from '@/utils/markdownSafe'
+import { statusLabel } from '@/utils/chatStatus'
+import MarkdownRender from '@/components/MarkdownRender.vue'
 import { useAIStore } from '@/stores/aiStore'
 import type { ChatMessageItem } from '@/stores/aiDb'
 
@@ -59,15 +63,28 @@ const applySettings = async () => {
 
 const chatMessages = computed(() => props.messages ?? aiStore.chatMessages)
 
-const scrollChatToBottom = async () => {
-  // 弹窗刚打开时 DOM 高度还没稳定，多等两帧再滚，避免停在顶部
+const scrollChatToBottom = async (force = false) => {
+  // 滚动锚定：非强制时只有用户贴底才跟随，防止阅读历史时抖动
   await nextTick()
+  const el = chatListRef.value
+  if (!el) return
+  if (!force && !isNearBottom(el)) {
+    showBackToBottom.value = true
+    return
+  }
+  showBackToBottom.value = false
   requestAnimationFrame(() => {
-    const el = chatListRef.value
-    if (!el) return
     el.scrollTop = el.scrollHeight
   })
 }
+
+const onChatScroll = () => {
+  const el = chatListRef.value
+  if (!el) return
+  showBackToBottom.value = !isNearBottom(el)
+}
+
+const showBackToBottom = ref(false)
 
 watch(
   () => chatMessages.value.length,
@@ -104,31 +121,39 @@ const handleChatSend = async () => {
   if (!content || chatSending.value) return
 
   chatSending.value = true
+  aiStore.setChatStatus('thinking')
   await aiStore.addChatMessage({ role: 'user', content })
   chatInput.value = ''
+  void scrollChatToBottom(true)
 
   try {
-    // Skill 优先：查数/文案/客服统一走后端 Skill 流式接口（/agent/ask/stream），逐字输出
+    // Skill 优先：所有问题都先过后端 Skill 路由（含历史改写），命中才用 skill 数据；
+    // 未命中（skill=null）则清空复用消息，走普通 LLM，保证闲聊质量
     let reusedAssistantId: string | null = null
-    if (looksLikeSkillQuery(content)) {
-      try {
-        const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
-        let acc = ''
-        const res = await askAgentSkillStream(content, {
-          onDelta: (chunk) => {
-            acc += chunk
-            void aiStore.updateChatMessage(assistantId, { content: acc })
-          },
-        })
-        if (res.skill) {
-          await aiStore.updateChatMessage(assistantId, { content: `${skillIcon(res.skill)} ${res.answer}` })
-          await scrollChatToBottom()
-          return
-        }
-        reusedAssistantId = assistantId
-      } catch {
-        /* skill 失败则回落到普通 LLM 对话 */
+    try {
+      aiStore.setChatStatus('tool_calling')
+      const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
+      aiStore.setChatStatus('answering')
+      const buf = createStreamBuffer((text) => {
+        aiStore.patchChatMessageContent(assistantId, text)
+        void scrollChatToBottom()
+      })
+      const history = aiStore.chatMessages.slice(-7, -1).map((m) => ({ role: m.role, content: m.content }))
+      const res = await askAgentSkillStream(content, {
+        history,
+        onDelta: (chunk) => buf.push(chunk),
+      })
+      buf.flushNow()
+      if (res.skill) {
+        await aiStore.updateChatMessage(assistantId, { content: `${skillIcon(res.skill)} ${res.answer}` })
+        await scrollChatToBottom(true)
+        return
       }
+      // 非 skill：清空占位消息，复用于普通 LLM
+      aiStore.patchChatMessageContent(assistantId, '')
+      reusedAssistantId = assistantId
+    } catch {
+      /* skill 失败则回落到普通 LLM 对话 */
     }
     const context = buildChatContext(
       aiStore.chatMessages.map((m) => ({
@@ -137,20 +162,25 @@ const handleChatSend = async () => {
       }))
     )
     const assistantId = reusedAssistantId ?? (await aiStore.addChatMessage({ role: 'assistant', content: '' }))
-    let acc = ''
+    aiStore.setChatStatus('answering')
+    const buf = createStreamBuffer((text) => {
+      aiStore.patchChatMessageContent(assistantId, text)
+      void scrollChatToBottom()
+    })
     await chatAIStream(context, {
       max_tokens: aiStore.userConfig.maxTokens,
       temperature: aiStore.userConfig.temperature,
-      onDelta: (chunk: string) => {
-        acc += chunk
-        void aiStore.updateChatMessage(assistantId, { content: acc })
-      },
+      onDelta: (chunk: string) => buf.push(chunk),
     })
+    buf.flushNow()
+    await aiStore.persistChatMessage(assistantId)
   } catch (error) {
     const msg = error instanceof Error ? error.message : '发送失败，请稍后重试'
+    aiStore.forceChatStatus('error')
     ElMessage.error(msg)
   } finally {
     chatSending.value = false
+    aiStore.forceChatStatus('idle')
   }
 }
 
@@ -190,21 +220,23 @@ defineExpose({ openChat, closeChat, sendMessage })
         chatMessages.length === 0 ? '就绪' : `上下文 ${Math.min(chatMessages.length, 8)} 条`
       }}）</div>
     </div>
-    <div ref="chatListRef" class="chat-float-body">
+    <div ref="chatListRef" class="chat-float-body" @scroll="onChatScroll">
       <div v-if="chatMessages.length === 0" class="chat-float-empty">
         <div class="chat-float-empty-title">开始和运营专家聊聊</div>
         <div class="chat-float-empty-desc">可以把上面的标题/文案复制过来，让我给你多几个版本或针对平台规则再优化。</div>
       </div>
       <div v-for="m in chatMessages" :key="m.id" class="chat-msg" :class="m.role">
         <div class="chat-bubble">
-          <div class="chat-text">{{ m.content }}</div>
+          <MarkdownRender v-if="m.role === 'assistant'" :content="m.content" />
+          <div v-else class="chat-text">{{ m.content }}</div>
         </div>
       </div>
       <div v-if="chatSending" class="chat-msg assistant">
         <div class="chat-bubble">
-          <span class="chat-typing">正在生成…</span>
+          <span class="chat-typing">{{ statusLabel(aiStore.chatStatus) || '正在生成…' }}</span>
         </div>
       </div>
+      <el-button v-if="showBackToBottom" class="back-bottom" size="small" round @click="scrollChatToBottom(true)">回到底部</el-button>
     </div>
     <div class="chat-float-input">
       <el-input
@@ -361,6 +393,13 @@ defineExpose({ openChat, closeChat, sendMessage })
   flex-direction: column;
   gap: 10px;
   background: radial-gradient(circle at top left, rgba(148, 163, 184, 0.15), transparent 55%);
+  position: relative;
+}
+
+.back-bottom {
+  position: sticky;
+  bottom: 8px;
+  align-self: center;
 }
 
 .chat-float-empty {

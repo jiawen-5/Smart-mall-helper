@@ -14,8 +14,10 @@ from .. import models
 
 _INTENT_RE = re.compile(
     r"(销量|销售额|销售总额|销售总|总额|gmv|营业额|转化率|库存|价格|标价|品牌|品类|sku|对比|环比|同比|"
-    r"卖了多少|卖得|滞销|热销|爆款|查询|查一下|什么价|多少钱|哪个规格|有多少|"
-    r"总销售额|总订单|订单数|订单量|成交额|成交量|平台.*销|销.*平台)",
+    r"卖了多少|卖得|卖的好|好卖|畅销|滞销|热销|爆款|查询|查一下|什么价|多少钱|哪个规格|有多少|"
+    r"总销售额|总订单|订单数|订单量|成交额|成交量|平台.*销|销.*平台|"
+    r"收入|成交|表现|数据|情况|趋势|分析|报表|复盘|盘点|排行榜|排名|"
+    r"怎么样|如何|多少|表现如何|卖得好|好吗|好么)",
     re.IGNORECASE,
 )
 _PRODUCT_HINT_RE = re.compile(r"(商品|产品|货|单品|SKU|sku|款|牌)")
@@ -37,6 +39,37 @@ PLATFORM_ALIASES = {
 
 # 平台级汇总意图：没提具体商品、只问平台/全站总数
 _AGG_RE = re.compile(r"(总销售额|销售总额|销售总|总额|总订单|订单数|订单量|成交额|成交量|一共卖|总共卖|平台.*(销|订单)|全站|所有平台)")
+
+
+def detect_category(db: Session, question: str) -> str | None:
+    """从问句提取品类：“母婴类产品/母婴怎么样” -> “母婴”，并用 DB 校验真实存在才返回。"""
+    q = question or ""
+    m = re.search(r"([一-鿿A-Za-z0-9]{2,10}?)(?:类|系)?(?:产品|商品|品类|类目)", q)
+    candidates: list[str] = []
+    if m:
+        core = m.group(1).strip("的这个那")
+        if len(core) >= 2:
+            candidates.append(core)
+    # 常见品类别名直接候选
+    for kw in ["母婴", "美妆", "护肤", "彩妆", "服装", "服饰", "女装", "男装", "童装",
+               "数码", "3C", "家电", "家居", "食品", "生鲜", "零食", "饮料",
+               "运动", "户外", "图书", "玩具", "宠物", "汽车", "办公"]:
+        if kw in q and kw not in candidates:
+            candidates.append(kw)
+    for cand in candidates:
+        hit = (
+            db.query(models.Product.global_product_id)
+            .filter(
+                or_(
+                    models.Product.category.like(f"%{cand}%"),
+                    models.Product.subcategory.like(f"%{cand}%"),
+                )
+            )
+            .first()
+        )
+        if hit:
+            return cand
+    return None
 
 
 def detect_platform(question: str, explicit: str | None = None) -> str | None:
@@ -64,8 +97,13 @@ def looks_like_product_query(question: str) -> bool:
     # 创意/生成类指令优先放行，不进入查数 Skill
     if _CREATIVE_RE.search(q):
         return False
-    # 命中指标词，或（提到商品词且至少有一串有效字符）视为查询
-    return bool(_INTENT_RE.search(q) or (_PRODUCT_HINT_RE.search(q) and re.search(r"[一-鿿A-Za-z0-9]{2,}", q)))
+    if _INTENT_RE.search(q):
+        return True
+    # 兜底：提到商品词 + 疑问/对比语气（“那款杯子怎么样？”“这件卖得好吗？”）也算查询
+    if _PRODUCT_HINT_RE.search(q) and re.search(r"(怎么样|如何|多少|好吗|行吗|呢|吗|？|\?|对比|推荐)", q):
+        return True
+    # 兜底：提到商品词且至少有一串有效字符视为查询
+    return bool(_PRODUCT_HINT_RE.search(q) and re.search(r"[一-鿿A-Za-z0-9]{2,}", q))
 
 
 # ---------- 2. 参数提取 ----------
@@ -149,7 +187,7 @@ def _tokens(question: str) -> list[str]:
 
 
 def resolve_products(db: Session, question: str, platform: str | None, limit: int = 5):
-    """按 ID 精确匹配优先，其次按名称/品牌/品类模糊匹配。返回 (products, matched_by)。"""
+    """按 ID 精确匹配优先，其次品类匹配，再按名称/品牌/品类模糊匹配。返回 (products, matched_by)。"""
     q = (question or "").strip()
     # 1) 精确 ID
     exact = (
@@ -159,7 +197,21 @@ def resolve_products(db: Session, question: str, platform: str | None, limit: in
     )
     if exact:
         return [exact], "id"
-    # 2) token 模糊匹配
+    # 2) 品类匹配：“母婴类/母婴产品/美妆品类” -> category LIKE %母婴%
+    cat = detect_category(db, q)
+    if cat:
+        cq = db.query(models.Product).filter(
+            or_(
+                models.Product.category.like(f"%{cat}%"),
+                models.Product.subcategory.like(f"%{cat}%"),
+            )
+        )
+        if platform:
+            cq = cq.filter(models.Product.platform == platform)
+        rows = cq.limit(limit).all()
+        if rows:
+            return rows, "category"
+    # 3) token 模糊匹配
     scored: dict[str, object] = {}
     for tok in _tokens(q):
         rows = (
@@ -310,7 +362,7 @@ def run(db: Session, question: str, platform: str | None = None) -> dict:
     items.sort(key=lambda x: x["current"]["gmv"], reverse=True)
     total_gmv = round(sum(i["current"]["gmv"] for i in items), 2)
     total_qty = sum(i["current"]["qty"] for i in items)
-    return {
+    result = {
         "skill": "product_metrics",
         "matched": True,
         "matched_by": matched_by,
@@ -330,3 +382,7 @@ def run(db: Session, question: str, platform: str | None = None) -> dict:
         },
         "notes": "转化率=订单数/商品浏览PV；环比=与上一等长周期对比；同比=与去年同期对比（无去年数据则为null）。",
     }
+    if matched_by == "category":
+        result["category"] = detect_category(db, question)
+        result["notes"] = f"按品类“{result['category']}”筛选，按 GMV 降序排列，销量最高的是「{result['compare']['top_by_gmv']}」。" + result["notes"]
+    return result

@@ -54,12 +54,18 @@ export const askAgentSkill = (question: string, platform?: string) =>
 /** Skill 流式调用：走 /agent/ask/stream（SSE），文案/客服/查数统一逐字输出 */
 export const askAgentSkillStream = async (
   question: string,
-  opts: { platform?: string; onDelta: (chunk: string) => void; onSkill?: (skill: string | null) => void }
+  opts: { platform?: string; history?: { role: string; content: string }[]; onDelta: (chunk: string) => void; onSkill?: (skill: string | null) => void }
 ): Promise<{ skill: string | null; answer: string; data: unknown }> => {
+  const orderMatch = question.match(/(?:订单号|订单|order[_ ]?id)\s*[:：]?\s*([A-Za-z0-9\-_]{6,40})/i)
   const resp = await fetch('/api/agent/ask/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, platform: opts.platform || undefined }),
+    body: JSON.stringify({
+      question,
+      platform: opts.platform || undefined,
+      history: (opts.history || []).slice(-6),
+      order_id: orderMatch ? orderMatch[1] : undefined,
+    }),
   })
   if (!resp.ok || !resp.body) throw new Error(`Skill 流式请求失败：${resp.status}`)
   const reader = resp.body.getReader()

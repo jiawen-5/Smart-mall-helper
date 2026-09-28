@@ -8,6 +8,7 @@ import {
   type AIUserConfig,
   type ChatMessageItem,
 } from './aiDb'
+import { canTransit, type ChatStatus } from '@/utils/chatStatus'
 
 type AIStoreState = {
   history: AIHistoryItem[]
@@ -15,6 +16,7 @@ type AIStoreState = {
   chatMessages: ChatMessageItem[]
   hydrated: boolean
   loading: boolean
+  chatStatus: ChatStatus
 }
 
 const MAX_HISTORY = 30
@@ -27,11 +29,19 @@ export const useAIStore = defineStore('ai', {
     chatMessages: [],
     hydrated: false,
     loading: false,
+    chatStatus: 'idle',
   }),
   getters: {
     recentHistory: (state) => state.history.slice(0, 10),
   },
   actions: {
+    setChatStatus(next: ChatStatus) {
+      if (!canTransit(this.chatStatus, next)) return
+      this.chatStatus = next
+    },
+    forceChatStatus(next: ChatStatus) {
+      this.chatStatus = next
+    },
     async ensureHydrated() {
       if (this.hydrated || this.loading) return
       this.loading = true
@@ -80,6 +90,17 @@ export const useAIStore = defineStore('ai', {
     async clearChat() {
       this.chatMessages = []
       await aiDb.chatMessages.clear()
+    },
+    // 流式高频更新：只改内存，不写 IndexedDB，结束时再 persistChatMessage 一次落盘
+    patchChatMessageContent(id: string, content: string) {
+      const index = this.chatMessages.findIndex((m) => m.id === id)
+      if (index === -1) return
+      const current = this.chatMessages[index] as ChatMessageItem
+      this.chatMessages[index] = { ...current, content }
+    },
+    async persistChatMessage(id: string) {
+      const found = this.chatMessages.find((m) => m.id === id)
+      if (found) await aiDb.chatMessages.put(toRaw(found))
     },
     async updateChatMessage(id: string, patch: Partial<Pick<ChatMessageItem, 'role' | 'content'>>) {
       const index = this.chatMessages.findIndex((m) => m.id === id)
