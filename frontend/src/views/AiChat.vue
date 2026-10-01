@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close, FullScreen, Promotion, Setting } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
-import { askAgentSkillStream, skillIcon } from '@/utils/backendApi'
+import { routeSkill, streamProductMetrics, streamCopywriting, streamCustomerService, skillIcon } from '@/utils/backendApi'
 import { selectByTokenBudget, CONTEXT_TOKEN_BUDGET } from '@/utils/contextBudget'
 import { createStreamBuffer } from '@/utils/streamBuffer'
 import { statusLabel } from '@/utils/chatStatus'
@@ -134,53 +134,43 @@ const handleChatSend = async () => {
   void scrollChatToBottom(true)
 
   try {
-    // Skill 优先：所有问题都先过后端 Skill 路由（含历史改写），命中才用 skill 数据；
-    // 未命中（skill=null）则清空复用消息，走普通 LLM，保证闲聊质量
-    let reusedAssistantId: string | null = null
-    try {
-      aiStore.setChatStatus('tool_calling')
-      const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
-      aiStore.setChatStatus('answering')
-      const buf = createStreamBuffer((text) => {
-        aiStore.patchChatMessageContent(assistantId, text)
-        void scrollChatToBottom()
-      })
-      // 注意：此时 chatMessages 尾部是 [本轮 user, 占位 assistant]，都要排除，只取更早的消息
-      const history = aiStore.chatMessages.slice(0, -2).map((m) => ({ role: m.role, content: m.content }))
-      const res = await askAgentSkillStream(content, {
-        history,
-        onDelta: (chunk) => buf.push(chunk),
-      })
-      buf.flushNow()
-      if (res.skill) {
-        await aiStore.updateChatMessage(assistantId, { content: `${skillIcon(res.skill)} ${res.answer}` })
-        await scrollChatToBottom(true)
-        return
-      }
-      // 非 skill：清空占位消息，复用于普通 LLM
-      aiStore.patchChatMessageContent(assistantId, '')
-      reusedAssistantId = assistantId
-    } catch {
-      /* skill 失败则回落到普通 LLM 对话 */
-    }
-    const context = buildChatContext(
-      aiStore.chatMessages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }))
-    )
-    const assistantId = reusedAssistantId ?? (await aiStore.addChatMessage({ role: 'assistant', content: '' }))
-    aiStore.setChatStatus('answering')
+    const history = aiStore.chatMessages.slice(0, -1).map((m) => ({ role: m.role, content: m.content }))
+    const routed = await routeSkill(content, history).catch(() => ({ skill: null as string | null }))
+    const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
     const buf = createStreamBuffer((text) => {
       aiStore.patchChatMessageContent(assistantId, text)
       void scrollChatToBottom()
     })
-    await chatAIStream(context, {
-      max_tokens: aiStore.userConfig.maxTokens,
-      temperature: aiStore.userConfig.temperature,
-      onDelta: (chunk: string) => buf.push(chunk),
-    })
+    const onStatus = (s: string) => {
+      if (s === 'tool_calling') aiStore.setChatStatus('tool_calling')
+      else if (s === 'answering') aiStore.setChatStatus('answering')
+    }
+    let res: { skill: string | null; answer: string }
+    if (routed.skill === 'product_metrics') {
+      aiStore.setChatStatus('tool_calling')
+      res = await streamProductMetrics(content, { history, onDelta: (c) => buf.push(c), onStatus })
+    } else if (routed.skill === 'copywriting') {
+      aiStore.setChatStatus('tool_calling')
+      res = await streamCopywriting({ question: content, history }, { onDelta: (c) => buf.push(c), onStatus })
+    } else if (routed.skill === 'customer_service') {
+      aiStore.setChatStatus('tool_calling')
+      const orderMatch = content.match(/(?:订单号|订单|order[_ ]?id)\s*[:：]?\s*([A-Za-z0-9\-_]{6,40})/i)
+      res = await streamCustomerService({ question: content, history, order_id: orderMatch ? orderMatch[1] : undefined }, { onDelta: (c) => buf.push(c), onStatus })
+    } else {
+      const context = buildChatContext(aiStore.chatMessages.slice(0, -1).map((m) => ({ role: m.role, content: m.content })))
+      res = { skill: null, answer: '' }
+      aiStore.setChatStatus('answering')
+      await chatAIStream(context, {
+        max_tokens: aiStore.userConfig.maxTokens,
+        temperature: aiStore.userConfig.temperature,
+        onDelta: (chunk: string) => buf.push(chunk),
+        onStatus: (s) => aiStore.setChatStatus(s === 'answering' ? 'answering' : 'thinking'),
+      })
+    }
     buf.flushNow()
+    if (res.skill) {
+      await aiStore.updateChatMessage(assistantId, { content: `${skillIcon(res.skill)} ${res.answer}` })
+    }
     await aiStore.persistChatMessage(assistantId)
   } catch (error) {
     const msg = error instanceof Error ? error.message : '发送失败，请稍后重试'

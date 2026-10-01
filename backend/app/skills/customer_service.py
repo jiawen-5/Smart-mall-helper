@@ -15,6 +15,7 @@ import re
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..context import trim_history
 from . import compliance, faq
 from .llm import llm_chat
 
@@ -221,13 +222,10 @@ async def run(
             "notes": "命中本地 FAQ 知识库，直接返回标准答案，未调用大模型。",
         }
 
-    # 2) 未命中：交给 LLM
+    # 2) 未命中：交给 LLM（历史走 2000 token 预算裁剪，不再固定取后 6 条）
     messages: list[dict] = [{"role": "system", "content": _SYSTEM}]
-    for h in (history or [])[-6:]:
-        role = h.get("role")
-        content = (h.get("content") or "").strip()
-        if role in ("user", "assistant") and content:
-            messages.append({"role": role, "content": content})
+    for h in trim_history(history):
+        messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": build_prompt(q, scene, order_ctx, product_ctx)})
 
     text = await llm_chat(messages, temperature=0.5, max_tokens=600)

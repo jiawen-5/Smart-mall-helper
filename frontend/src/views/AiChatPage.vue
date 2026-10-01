@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Close, Promotion, Setting, Delete } from '@element-plus/icons-vue'
 import { buildChatContext, chatAIStream } from '@/utils/aiApi'
-import { askAgentSkillStream, skillIcon } from '@/utils/backendApi'
+import { routeSkill, streamProductMetrics, streamCopywriting, streamCustomerService, skillIcon } from '@/utils/backendApi'
 import { selectByTokenBudget, CONTEXT_TOKEN_BUDGET } from '@/utils/contextBudget'
 import VirtualChatList from '@/components/VirtualChatList.vue'
 import { useAIStore } from '@/stores/aiStore'
@@ -42,11 +42,14 @@ const onStickChange = (sticking: boolean) => {
   showBackToBottom.value = !sticking
 }
 
-const listRef = ref<{ scrollToBottom: (force?: boolean) => Promise<void>; scrollElement?: unknown } | null>(null)
+const listRef = ref<{ scrollToBottom: (force?: boolean) => Promise<void>; scrollElement?: { value?: unknown } | unknown } | null>(null)
 
 // 顶部加载更多：游标分页向前读 20 条，并补偿 scrollHeight 防止跳动
 const handleLoadMore = async () => {
-  const el = listRef.value?.scrollElement as HTMLElement | undefined
+  const raw = listRef.value?.scrollElement as { value?: unknown } | HTMLElement | undefined
+  const el = (raw && typeof raw === 'object' && 'value' in (raw as object)
+    ? (raw as { value?: unknown }).value
+    : raw) as HTMLElement | undefined
   const prevHeight = el?.scrollHeight ?? 0
   const added = await aiStore.loadOlderChatMessages()
   if (added > 0 && el) {
@@ -97,48 +100,50 @@ const handleSend = async () => {
   void scrollToBottom(true)
 
   try {
-    // Skill 优先：所有问题都先过后端 Skill 路由（含历史改写），命中才用 skill 数据；
-    // 未命中（skill=null）则清空复用消息，走普通 LLM，保证闲聊质量
-    let reusedAssistantId: string | null = null
-    try {
-      aiStore.setChatStatus('tool_calling')
-      const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
-      aiStore.setChatStatus('answering')
-      const buf = createStreamBuffer((text) => {
-        aiStore.patchChatMessageContent(assistantId, text)
-        void scrollToBottom()
-      })
-      // 注意：此时 chatMessages 尾部是 [本轮 user, 占位 assistant]，都要排除，只取更早的消息
-      const history = aiStore.chatMessages.slice(0, -2).map((m) => ({ role: m.role, content: m.content }))
-      const res = await askAgentSkillStream(content, {
-        history,
-        onDelta: (chunk) => buf.push(chunk),
-      })
-      buf.flushNow()
-      if (res.skill) {
-        await aiStore.updateChatMessage(assistantId, { content: `${skillIcon(res.skill)} ${res.answer}` })
-        await scrollToBottom(true)
-        return
-      }
-      aiStore.patchChatMessageContent(assistantId, '')
-      reusedAssistantId = assistantId
-    } catch {
-      /* skill 失败则回落到普通 LLM 对话 */
-    }
-    const context = buildChatContext(aiStore.chatMessages.map((m) => ({ role: m.role, content: m.content })))
-    const assistantId = reusedAssistantId ?? (await aiStore.addChatMessage({ role: 'assistant', content: '' }))
-    aiStore.setChatStatus('answering')
+    // 先轻量路由（/agent/route），再按 skill 打对应流式接口，保证网络面板可区分：
+    // chat-stream（闲聊）/ product-metrics / copywriting / customer-service
+    const history = aiStore.chatMessages.slice(0, -1).map((m) => ({ role: m.role, content: m.content }))
+    const routed = await routeSkill(content, history).catch(() => ({ skill: null as string | null }))
+    const assistantId = await aiStore.addChatMessage({ role: 'assistant', content: '' })
     const buf = createStreamBuffer((text) => {
       aiStore.patchChatMessageContent(assistantId, text)
       void scrollToBottom()
     })
-    await chatAIStream(context, {
-      max_tokens: aiStore.userConfig.maxTokens,
-      temperature: aiStore.userConfig.temperature,
-      onDelta: (chunk: string) => buf.push(chunk),
-    })
+    const onStatus = (s: string) => {
+      if (s === 'tool_calling') aiStore.setChatStatus('tool_calling')
+      else if (s === 'answering') aiStore.setChatStatus('answering')
+    }
+    let res: { skill: string | null; answer: string }
+    if (routed.skill === 'product_metrics') {
+      aiStore.setChatStatus('tool_calling')
+      res = await streamProductMetrics(content, { history, onDelta: (c) => buf.push(c), onStatus })
+    } else if (routed.skill === 'copywriting') {
+      aiStore.setChatStatus('tool_calling')
+      res = await streamCopywriting({ question: content, history }, { onDelta: (c) => buf.push(c), onStatus })
+    } else if (routed.skill === 'customer_service') {
+      aiStore.setChatStatus('tool_calling')
+      const orderMatch = content.match(/(?:订单号|订单|order[_ ]?id)\s*[:：]?\s*([A-Za-z0-9\-_]{6,40})/i)
+      res = await streamCustomerService(
+        { question: content, history, order_id: orderMatch ? orderMatch[1] : undefined },
+        { onDelta: (c) => buf.push(c), onStatus },
+      )
+    } else {
+      // 大模型流式：thinking → answering，上下文 2000 token（后端裁剪）
+      const context = buildChatContext(aiStore.chatMessages.slice(0, -1).map((m) => ({ role: m.role, content: m.content })))
+      res = { skill: null, answer: '' }
+      await chatAIStream(context, {
+        max_tokens: aiStore.userConfig.maxTokens,
+        temperature: aiStore.userConfig.temperature,
+        onDelta: (c: string) => buf.push(c),
+        onStatus: (s) => aiStore.setChatStatus(s === 'answering' ? 'answering' : 'thinking'),
+      })
+    }
     buf.flushNow()
+    if (res.skill) {
+      await aiStore.updateChatMessage(assistantId, { content: `${skillIcon(res.skill)} ${res.answer || aiStore.chatMessages.find((m) => m.id === assistantId)?.content || ''}` })
+    }
     await aiStore.persistChatMessage(assistantId)
+    await scrollToBottom(true)
   } catch (error) {
     aiStore.forceChatStatus('error')
     ElMessage.error(error instanceof Error ? error.message : '发送失败，请稍后重试')

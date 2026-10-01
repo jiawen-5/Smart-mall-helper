@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import Base, engine
-from .routers import dashboard, products, users, orders, meta, agent
+from .routers import dashboard, products, users, orders, meta, agent, chat
 
 Base.metadata.create_all(bind=engine, checkfirst=True)
 
@@ -24,6 +24,7 @@ app.include_router(products.router)
 app.include_router(users.router)
 app.include_router(orders.router)
 app.include_router(agent.router)
+app.include_router(chat.router)
 
 
 @app.get("/")

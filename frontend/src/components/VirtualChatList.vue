@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useVirtualizer } from '@tanstack/vue-virtual'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import type { ChatMessageItem } from '@/stores/aiDb'
 import { isNearBottom } from '@/utils/markdownSafe'
 import MarkdownRender from '@/components/MarkdownRender.vue'
@@ -20,23 +19,11 @@ const emit = defineEmits<{ (e: 'load-more'): void; (e: 'stick-change', sticking:
 const scrollRef = ref<HTMLElement | null>(null)
 const sticking = ref(true)
 
-const virtualizer = useVirtualizer({
-  count: props.messages.length,
-  getScrollElement: () => scrollRef.value,
-  estimateSize: () => 110,
-  overscan: 6,
-})
-
-// 必须用 computed 包一层：getVirtualItems() 依赖滚动位置 + 测量缓存，直接存 const 不会更新
-const items = computed(() => virtualizer.value.getVirtualItems())
-const totalSize = computed(() => virtualizer.value.getTotalSize())
-
 const onScroll = () => {
   const el = scrollRef.value
   if (!el) return
   sticking.value = isNearBottom(el, 80)
   emit('stick-change', sticking.value)
-  // 滚动到顶部：触发游标加载下一页
   if (el.scrollTop < 160 && props.hasMore && !props.loadingMore) emit('load-more')
 }
 
@@ -44,7 +31,6 @@ const scrollToBottom = async (force = false) => {
   const el = scrollRef.value
   if (!el) return
   if (!force && !isNearBottom(el, 80)) return
-  // 虚拟列表初挂载时行高全是估算值，scrollHeight 会连跳几次，多刷几帧确保真正到底
   for (let i = 0; i < 3; i++) {
     await nextTick()
     el.scrollTop = el.scrollHeight
@@ -52,12 +38,10 @@ const scrollToBottom = async (force = false) => {
   sticking.value = true
 }
 
-// 初次挂载直接钉到底部（最新消息），而不是停在顶部
 onMounted(() => {
   void scrollToBottom(true)
 })
 
-// 新消息到达：贴底时跟随，否则保持位置（顶部加载时由调用方做 scrollHeight 补偿）
 watch(
   () => props.messages.length,
   async (n, prev) => {
@@ -78,28 +62,10 @@ defineExpose({ scrollToBottom, scrollElement: scrollRef })
     <div v-if="messages.length === 0 && !typingText" class="chat-empty-slot">
       <slot name="empty" />
     </div>
-    <div
-      :style="{ height: `${totalSize}px`, width: '100%', position: 'relative' }"
-    >
-      <div
-        v-for="row in items"
-        :key="messages[row.index]!.id"
-        :data-index="row.index"
-        :ref="(el) => (el as HTMLElement | null) && virtualizer.measureElement(el as HTMLElement)"
-        :style="{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: '100%',
-          transform: `translateY(${row.start}px)`,
-        }"
-      >
-        <div class="chat-msg" :class="messages[row.index]!.role">
-          <div class="chat-bubble">
-            <MarkdownRender v-if="messages[row.index]!.role === 'assistant'" :content="messages[row.index]!.content" />
-            <div v-else class="chat-text">{{ messages[row.index]!.content }}</div>
-          </div>
-        </div>
+    <div v-for="m in messages" :key="m.id" class="chat-msg" :class="m.role">
+      <div class="chat-bubble">
+        <MarkdownRender v-if="m.role === 'assistant'" :content="m.content" />
+        <div v-else class="chat-text">{{ m.content }}</div>
       </div>
     </div>
     <div v-if="typingText" class="chat-msg assistant">

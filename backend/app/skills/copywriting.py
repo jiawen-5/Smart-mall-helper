@@ -309,6 +309,7 @@ async def run(
     regenerate: bool = False,
     avoid: list[str] | None = None,
     fields: list[str] | None = None,
+    history: list[dict] | None = None,
 ) -> dict:
     style = parse_style(question, style)
     platform = parse_platform(question, platform)
@@ -318,9 +319,17 @@ async def run(
     ctx = collect_context(db, question, platform)
 
     prompt = build_prompt(ctx, style, platform, length_cfg, variants, avoid, fields)
+    # 多轮上下文（2000 token 预算）：把上一轮主题拼进 prompt，支持"再来一个/短一点"类追问
+    hist_suffix = ""
+    if history:
+        from ..context import trim_history as _trim
+
+        turns = [f"{h['role']}：{h['content']}" for h in _trim(history)]
+        if turns:
+            hist_suffix = "\n【上文（已按 token 预算裁剪）】\n" + "\n".join(turns) + "\n"
     # 重新生成时提高温度并带上去重清单，保证换一批不同角度
     text = await llm_chat(
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}],
+        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt + hist_suffix}],
         temperature=0.95 if regenerate else 0.8,
         max_tokens=1600,
     )

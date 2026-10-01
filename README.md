@@ -12,29 +12,6 @@
 
 ---
 
-## 📝 最近更新
-
-<details>
-<summary><strong>查看版本更新记录（最新：2026-09-29）</strong></summary>
-
-- `2026-09-29`
-  - **对话渲染性能重构**：新增消息有限状态机（`thinking / tool_calling / answering / error`）、chunk 缓冲队列 + `requestAnimationFrame` 批量提交、TanStack Virtual 虚拟滚动 + IndexedDB 游标分页（每页 20 条）、Markdown 流式补全与滚动锚定。
-  - **安全加固**：AI 输出统一经 `markdown-it(html:false)` + DOMPurify 白名单净化后再渲染，防御 XSS。
-  - **上下文预算化**：废弃「固定 8 条消息」，改为按 token 预算（2000）从最新往前累加裁剪，普通对话与 Skill 流式接口共用同一套策略。
-  - **Skill 路由与多轮增强**：前端不再做关键词前置拦截，所有问题统一交后端路由；新增历史指代改写（「短一点」「它呢」）、品类查询匹配（「母婴类产品卖得好吗」按品类聚合排序）、非 Skill 问题回落普通 LLM 对话。
-- `2026-06-16`
-  - **三 Skill 贯通**：文案创意生成（Skill 2）与客服回复（Skill 3）接入 Agent 分派层。`agent.py` 支持同步/异步 Skill 混合调度、按签名透传参数、并新增 `/api/agent/ask/stream` 流式输出。
-  - **文案合规**：广告法极限词扫描与整改（`compliance.py`）覆盖「绝对化、排名、唯一性、首创、保证、铁价、贬低竞品」等类别；客服输出统一过敏感词过滤。
-  - **客服 FAQ**：本地 FAQ 知识库命中阈值下调，2 字关键词（如「尺码」「发票」）也能直接作答，未命中再走 LLM。
-  - **深度思考回滚**：移除 `deepseek-reasoner` 推理模型接入，恢复普通 `deepseek-chat` 流式对话，不再消费思考 token。
-- `2026-04-20`
-  - 拆分 `backend/`、`frontend/` 双目录，新增 FastAPI + SQLAlchemy 后端，直接映射 MySQL 真实电商表（platform / user / product / user_behavior / order / order_item 及字典表）。
-  - 仪表盘、商品分析、用户洞察三个页面由假数据替换为后端真实数据，Vite 代理统一转发 `/api` 到 `:8000`。
-
-</details>
-
----
-
 ## 📸 效果展示
 
 ### 首页仪表盘
@@ -79,10 +56,11 @@
 - 🎛️ **可控生成参数**：最大字数、Temperature 可调，文案支持「只给标题 / 只给卖点 / 只给口播」精细控制
 - 📦 **多端对话**：AI 对话弹窗与全屏页共用一份历史记录，支持继续追问
 - ⚡ **流式渲染不掉帧**：消息状态机（思考中 / 调用工具 / 生成中）+ chunk 缓冲队列按帧批量提交，流式回复不再逐字触发重渲染
-- 🧵 **虚拟滚动 + 游标分页**：长会话只渲染视口内几条 DOM，历史消息按时间倒序每页 20 条从 IndexedDB 游标续读
-- 🧮 **Token 预算上下文**：对话上下文按 2000 token 预算动态取舍（中文 1 字≈2 token），而非固定消息条数
+- 🧵 **游标分页长列表**：历史消息按时间倒序每页 20 条从 IndexedDB 游标续读、顶部上滑加载更早消息并补偿滚动高度避免跳动
+- 🧮 **Token 预算上下文**：对话上下文按 2000 token 预算动态取舍（中文 1 字≈2 token），而非固定消息条数，前端先裁、后端二次裁剪兜底
 - 🧷 **Markdown 流式友好**：未闭合代码块 / 加粗 / 表格自动补全，贴底才自动跟随、否则手动回到底部，消除布局抖动
 - 🔒 **输出净化**：AI 返回的富文本经 DOMPurify 白名单净化后渲染，防御 XSS 注入
+- 🗂️ **接口网络可区分**：AI 对话按用途拆「普通返回 / 大模型流式 / 三 Skill 流式」独立接口，网络面板一眼看出当前调用链路
 
 ---
 
@@ -95,7 +73,6 @@
 - LLM：DeepSeek（OpenAI 兼容接口）
 - 前端：Vue 3 + Vite + Element Plus + ECharts + Pinia
 - 本地存储：IndexedDB（Dexie，会话与历史，游标分页读取）
-- 长列表：TanStack Virtual（虚拟滚动，动态行高测量）
 - 富文本渲染：markdown-it + DOMPurify（流式补全 + XSS 净化）
 
 ### 核心架构分层
@@ -104,13 +81,14 @@
 | :--- | :--- | :--- |
 | 前端 | `frontend/src/views/*.vue` | 仪表盘、商品、用户、运营助手、AI 对话展示与交互 |
 | UI 框架 | `frontend/src/App.vue` | 顶栏导航、全屏对话页隐藏导航 |
-| 虚拟列表 | `frontend/src/components/VirtualChatList.vue` | 消息虚拟滚动、滚动锚定、顶部触发游标加载 |
+| 循环渲染 | `frontend/src/components/VirtualChatList.vue` | 消息列表直渲（`v-for`）、滚动锚定、顶部触发游标加载 |
 | 流式渲染 | `frontend/src/utils/streamBuffer.ts` | chunk 缓冲队列 + rAF/超时兜底批量提交 |
-| 上下文裁剪 | `frontend/src/utils/contextBudget.ts` | token 估算与预算内消息筛选（前后端同口径） |
+| 上下文裁剪 | `frontend/src/utils/contextBudget.ts` + `backend/app/context.py` | token 估算与预算内消息筛选（前端先裁、后端兜底，同口径同文件源） |
 | 状态机 | `frontend/src/utils/chatStatus.ts` | 消息状态定义与合法转移 |
 | 安全渲染 | `frontend/src/utils/markdownSafe.ts` | 流式 Markdown 补全 + 白名单净化 |
-| 调用层 | `frontend/src/utils/backendApi.ts` | 后端接口统一封装、历史透传与订单号提取 |
-| Agent 接口层 | `backend/app/routers/agent.py` | 意图识别路由、历史改写、上下文裁剪、Skill 分派、LLM 整理与流式输出 |
+| 调用层 | `frontend/src/utils/aiApi.ts` + `backendApi.ts` | `callAI`（普通返回）/ `chatAIStream`（大模型流式）/ Skill 流式与意图路由 |
+| 意图路由层 | `backend/app/routers/agent.py` | 意图识别、历史改写、上下文裁剪、Skill 分派、LLM 整理与流式输出 |
+| 对话路由层 | `backend/app/routers/chat.py` | `/api/chat` 普通返回（无上下文）与 `/api/chat-stream` 大模型流式（2000 token 上下文） |
 | 业务路由层 | `backend/app/routers/` | dashboard / products / users / orders / meta |
 | Skill 层 | `backend/app/skills/` | 三个 Skill + 共用规则引擎 + LLM 封装 |
 | ORM 模型 | `backend/app/models.py` | 映射 MySQL 真实电商表 |
@@ -149,16 +127,22 @@ flowchart TD
     Routers --> Models --> MySQL
 
     %% AI 对话：先走 Skill（查数等），否则普通 LLM
-    Vite -->|POST /api/ai/chat-stream| DS((DeepSeek))
+    Vite -->|POST /api/chat-stream| DS((DeepSeek))
 
-    Vite -->|POST /api/agent/ask| Agent
-    Agent --> S1 --> Models --> MySQL
-    Agent --> S2
-    Agent --> S3
+    Vite -->|POST /api/agent/route| Agent
+    Agent -->|分派| S1
+    Agent -->|分派| S2
+    Agent -->|分派| S3
+    Agent -->|未命中| DS
+
+    %% Skill 流式：前端按 route 命中分支直连
+    Vite -->|product-metrics/stream| S1
+    Vite -->|copywriting/stream| S2
+    Vite -->|customer-service/stream| S3
+    S1 --> Models --> MySQL
     S2 --> Rules
     S3 --> Rules
     S3 -->|FAQ 未命中| DS
-    Agent -->|polish=True 时| DS
 
     classDef frontend fill:#eef2ff,stroke:#818cf8,color:#111;
     classDef backend fill:#fefce8,stroke:#facc15,color:#111;
@@ -171,7 +155,7 @@ flowchart TD
     class Models,MySQL data;
 ```
 
-数据流路径：前端页面请求业务数据走 `/api/*` 或 `/api/dashboard/*` 直查 MySQL；用户发 AI 对话时先经 `agent.py` 做意图识别，匹配 Skill 1/2/3 则走对应 Skill（查数由代码算、文案/客服带规则校验），只有 Skill 1 的语言整理与普通对话才调用 DeepSeek。
+数据流路径：前端页面请求业务数据走 `/api/*` 或 `/api/dashboard/*` 直查 MySQL；用户发 AI 对话时先调轻量意图路由 `/api/agent/route`，匹配 Skill 1/2/3 则走对应 Skill 流式接口（查数由代码算、文案/客服带规则校验，网络面板分别显示 `product-metrics/stream`、`copywriting/stream`、`customer-service/stream`），未命中则走 `/api/chat-stream` 大模型流式；页面模块（标题优化 / 文案 / 话术工具）用 `/api/chat` 普通返回，不拼上下文。
 
 ### Skill 分派流程
 
@@ -229,8 +213,9 @@ idle → thinking → tool_calling → answering → idle
                      ↘ error ↗
 ```
 
-- 普通对话：`thinking → answering`（两态退化）；
-- 命中 Skill：`thinking → tool_calling → answering`，「调用工具」阶段显式提示「正在查询业务数据…」，把 Skill 查询空窗期可视化；
+- 普通对话：`thinking → answering`（两态退化，走 `/api/chat-stream`）；
+- 命中 Skill：`thinking → tool_calling → answering`，「调用工具」阶段显式提示「正在查询业务数据…」，把 Skill 查询空窗期可视化；按命中 Skill 分别走 `/api/agent/skill/product-metrics/stream`、`copywriting/stream`、`customer-service/stream` 三个流式接口，先经 `/api/agent/route` 轻量意图路由（只跑 matcher，不执行 Skill / LLM）判断走哪个分支；
+- 页面模块（标题优化 / 文案 / 客服工具）用 `/api/chat` 普通返回，单次请求、不做上下文；
 - 异常走 `error`，`finally` 强制回 `idle`，杜绝状态卡死。
 
 ### 2. chunk 缓冲队列 + requestAnimationFrame 批量提交
@@ -245,11 +230,11 @@ onDelta → queue → requestAnimationFrame → flush → 单次 state 更新
 - 后台标签页 `rAF` 被挂起时自动降级为 `setTimeout(50ms)` 兜底；
 - 效果：Pinia 更新频率从「每秒数十次」降到「≤60fps」。
 
-### 3. 虚拟滚动 + IndexedDB 游标分页
+### 3. 游标分页 + 滚动锚定
 
 - **分页**：`chatMessages` 按 `createdAt` 倒序建索引，首屏只查最新 20 条；滚动到顶部时以 `cursor = 已加载最早一条 createdAt` 继续向前读下一页（多取 1 条做同毫秒去重），内存上限 200 条。
-- **虚拟滚动**：TanStack Virtual 只渲染视口内 + `overscan 6` 条 DOM；Markdown 气泡高度不定，使用 `measureElement` 动态测量而非写死行高。
-- **加载体验**：顶部加载后按 `scrollHeight` 差值补偿 `scrollTop`，避免向前翻页时视口跳动；打开对话自动钉底到最新消息。
+- **渲染**：会话规模在单页内可承受，`VirtualChatList` 用普通 `v-for` 直渲（避免虚拟化库与打包版本不一致导致的运行时崩溃），配合 `measureElement` 思路——每条消息固定行内自适应高度。
+- **加载体验**：顶部加载后按 `scrollHeight` 差值补偿 `scrollTop`，避免向前翻页时视口跳动；打开对话自动钉底到最新消息；回看历史时自动贴合改为手动「回到底部」按钮。
 
 ### 4. Markdown 流式渲染优化
 
@@ -269,9 +254,10 @@ AI 输出视为不可信输入，统一走 `markdown-it（html: false）→ DOMP
 （单条自身超预算时，二分截断仅保留尾部可用部分）
 ```
 
-- 普通对话（`/api/ai/chat-stream`）与 Skill 流式接口（`/api/agent/ask/stream`）**共用同一套裁剪策略**，前端先裁、后端按同口径二次裁剪防伪造；
-- 短消息多带、长回复少带，比固定条数更贴合真实请求成本；
-- 对话页实时显示「上下文 N 条 · 约 X token / 2000」，便于观测。
+- **统一口径**：前后端共用一套估算与裁剪逻辑。前端「先裁再发」——`chatAIStream`、`routeSkill`、三个 Skill 流式调用在发送前都用 `contextBudget.ts` 裁到 2000 token（单条上限 800 字），线上传的就是实际用的上下文；后端 `backend/app/context.py` 是裁剪规则的**唯一权威实现**，`agent.py`、`chat.py`、`customer_service.py`、`copywriting.py` 均匀导入复用，并在接收端按同口径二次裁剪兜底防伪造。
+- **「再来一个 / 换一批」等追问**：文案 Skill 也接收裁剪后的历史（`CopywritingIn.history`），多轮指代改写后仍能延续上文意图。
+- **普通调用不带上下文**：`/api/chat` 仅取当前 `prompt` 单条，不拼历史，适合标题优化 / 话术生成等一次性生成场景。
+- **短消息多带、长回复少带**，比固定条数更贴合真实请求成本；对话页实时显示「上下文 N 条 · 约 X token / 2000」，便于观测。
 
 ---
 
@@ -295,8 +281,10 @@ AI 输出视为不可信输入，统一走 `markdown-it（html: false）→ DOMP
 │   │   ├── config.py                 # 环境变量、MySQL / DeepSeek 配置
 │   │   ├── database.py               # SQLAlchemy engine / session
 │   │   ├── models.py                 # 映射 MySQL 真实电商表
+│   │   ├── context.py                 # 上下文 token 预算裁剪（前后端唯一权威实现）
 │   │   ├── routers/
-│   │   │   ├── agent.py              # Agent：意图识别 + Skill 分派 + 流式输出
+│   │   │   ├── agent.py              # Agent：意图路由 / Skill 分派与流式输出
+│   │   │   ├── chat.py               # /api/chat（普通返回）+ /api/chat-stream（大模型流式）
 │   │   │   ├── dashboard.py          # KPI / 趋势 / 漏斗
 │   │   │   ├── products.py           # 商品列表 / 销量聚合 / 详情
 │   │   │   ├── users.py              # 用户分层 / 列表
@@ -322,12 +310,12 @@ AI 输出视为不可信输入，统一走 `markdown-it（html: false）→ DOMP
 │   │   │   ├── AiChat.vue            # AI 对话悬浮弹窗
 │   │   │   └── AiChatPage.vue        # AI 对话全屏页
 │   │   ├── components/ThinkingBox.vue # 深度思考折叠框（已回滚停用）
-│   │   ├── components/VirtualChatList.vue # 消息虚拟滚动列表
+│   │   ├── components/VirtualChatList.vue # 消息列表（游标加载 + 滚动锚定）
 │   │   ├── components/MarkdownRender.vue  # 流式 Markdown 渲染（补全 + 净化）
 │   │   ├── utils/
-│   │   │   ├── backendApi.ts         # 后端调用层 + 历史透传 + 订单号提取
-│   │   │   ├── aiApi.ts              # DeepSeek 流式调用 + 上下文构建
-│   │   │   ├── contextBudget.ts      # token 估算与预算裁剪
+│   │   │   ├── aiApi.ts              # callAI（普通返回）/ chatAIStream（大模型流式）
+│   │   │   ├── backendApi.ts         # 后端调用层 + 意图路由 + 三 Skill 流式
+│   │   │   ├── contextBudget.ts      # token 估算与预算裁剪（前后端同口径）
 │   │   │   ├── streamBuffer.ts       # chunk 缓冲队列 + rAF 批量提交
 │   │   │   ├── chatStatus.ts         # 消息状态机定义与转移规则
 │   │   │   └── markdownSafe.ts       # 流式补全 + 净化白名单 + 滚动判定
@@ -349,13 +337,17 @@ AI 输出视为不可信输入，统一走 `markdown-it（html: false）→ DOMP
 **后端**
 
 - `backend/app/routers/agent.py`
-  Agent 路由层：历史指代改写、token 预算上下文裁剪、意图识别分发、Skill 同步/异步混合调度、按签名透传参数、查数类 LLM 整理、文案/客服类代码整理，以及 `/ask/stream` 流式输出；未命中 Skill 时返回空结果交由前端走普通对话。
+  Agent 路由层：`/api/agent/route` 轻量意图路由（只跑 matcher，不执行 Skill / LLM）、历史指代改写、token 预算上下文裁剪、意图识别分发、Skill 同步/异步混合调度、按签名透传参数、查数类 LLM 整理、文案/客服类代码整理，以及三个 Skill 的流式输出（`product-metrics/stream`、`copywriting/stream`、`customer-service/stream`），SSE 顺序 `thinking → tool_calling → answering → done`。
+- `backend/app/routers/chat.py`
+  对话路由层：`/api/chat` 普通调用（只取当前 prompt，不做上下文，供页面模块用）与 `/api/chat-stream` 大模型流式（2000 token 上下文裁剪，SSE 顺序 `thinking → answering`），统一走 FastAPI 网关，DeepSeek 请求只在此与 Skill 内部发出。
+- `backend/app/context.py`
+  上下文 token 预算裁剪的**唯一权威实现**（`trim_history`），被 `agent.py`、`chat.py`、`customer_service.py`、`copywriting.py` 复用；与前端 `contextBudget.ts` 同估算口径，前端先裁、后端兜底。
 - `backend/app/skills/product_metrics.py`
   Skill 1 查数：商品 ID / 品类 / 名称 / 品牌逐级解析、时间范围解析（今天 / 近 N 天 / 明确日期区间）、销量 / GMV / 转化率 / 环比 / 同比计算，品类查询按 GMV 降序并给出销量最高款结论。
 - `backend/app/skills/copywriting.py`
-  Skill 2 文案：商品上下文提取、风格（简约/种草/直播风）与长度解析、LLM 草稿 + 极限词校验 + 多版本整理。
+  Skill 2 文案：商品上下文提取、风格（简约/种草/直播风）与长度解析、LLM 草稿 + 极限词校验 + 多版本整理；接收 `history` 走 2000 token 裁剪，支持「再来一个 / 换一批」多轮追问。
 - `backend/app/skills/customer_service.py`
-  Skill 3 客服：订单 / 商品上下文加载、FAQ 优先命中、LLM 生成话术、敏感词过滤。
+  Skill 3 客服：订单 / 商品上下文加载、FAQ 优先命中、LLM 生成话术（历史按 2000 token 裁剪，不再固定后 6 条）、敏感词过滤。
 - `backend/app/skills/compliance.py`
   广告法极限词扫描 / 整改 + 敏感词过滤规则引擎。
 - `backend/app/skills/faq.py`
@@ -366,13 +358,15 @@ AI 输出视为不可信输入，统一走 `markdown-it（html: false）→ DOMP
 **前端**
 
 - `frontend/src/utils/backendApi.ts`
-  所有后端接口封装 + Skill 流式调用（自动携带裁剪后的历史与订单号）+ Skill 2/3 直接调用方法。
+  `routeSkill`（意图路由，先裁 2000 token 再发）、三个 Skill 流式调用（`streamProductMetrics / streamCopywriting / streamCustomerService`，均带裁剪后历史与订单号）+ Skill 2/3 直接调用方法。
+- `frontend/src/utils/aiApi.ts`
+  `callAI`（`/api/chat` 普通返回，无上下文）+ `chatAIStream`（`/api/chat-stream` 大模型流式，2000 token 上下文）。
 - `frontend/src/utils/contextBudget.ts`
-  token 估算与预算筛选：从最新消息向前累加，超预算即停，前后端同口径。
+  token 估算与预算筛选：从最新消息向前累加，超预算即停，与后端 `context.py` 同口径（前后端一份逻辑）。
 - `frontend/src/utils/streamBuffer.ts`
   chunk 缓冲队列：`rAF` 每帧批量提交，后台标签页降级 `setTimeout` 兜底。
 - `frontend/src/components/VirtualChatList.vue`
-  消息虚拟列表：动态行高测量、滚动锚定、打开自动钉底、顶部触发游标加载。
+  消息列表：普通 `v-for` 直渲、滚动锚定、打开自动钉底、顶部触发游标加载（已移除虚拟滚动库，避免版本不一致导致的运行时崩溃）。
 - `frontend/src/views/DataDashboard.vue`
   仪表盘：KPI、趋势图、订单状态分布与履约健康度，随 7/15/30 天切换联动。
 - `frontend/src/views/AiOperationAssistant.vue`
@@ -422,7 +416,7 @@ npm run dev
 
 前端地址：`http://localhost:5173`。
 
-前端 `vite.config.ts` 已把 `/api`（除 `/api/ai` 外）代理到 `http://127.0.0.1:8000`，所以页面请求 `/api/dashboard/metrics` 等会自动打到 FastAPI；`/api/ai/*` 由代理中间件直连 DeepSeek，无需改业务代码。
+前端 `vite.config.ts` 已把 `/api` 代理到 `http://127.0.0.1:8000`，页面请求 `/api/dashboard/metrics`、`/api/chat-stream`、`/api/agent/route` 等所有接口都会自动打到 FastAPI；**所有 AI 调用（普通返回、大模型流式、Skill 流式）都走后端 Python 网关**，不再由前端直连 DeepSeek。
 
 ### 3. 验证 AI 对话
 
@@ -447,7 +441,7 @@ DEEPSEEK_API_KEY=your_deepseek_key
 DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
 ```
 
-> 说明：`DEEPSEEK_API_KEY` 为空时，Skill 会自动降级——查数走模板话术、文案走规则兜底文案、客服走 FAQ/规则模板，项目仍能运行。前端还需在 `frontend/.env.local` 配置 `DEEPSEEK_API_KEY`（供 `/api/ai` 代理直连 DeepSeek）。
+> 说明：`DEEPSEEK_API_KEY` 为空时，Skill 会自动降级——查数走模板话术、文案走规则兜底文案、客服走 FAQ/规则模板，项目仍能运行。API Key 只需在后端配置，前端所有 AI 请求都经 FastAPI 转发，无需在前端填写 Key。
 
 ---
 
@@ -468,14 +462,24 @@ DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
 | `GET` | `/api/orders/health?days=&platform=` | 订单状态分布 / 履约健康度 |
 | `GET` | `/api/users/segments?platform=` | 用户分层 + 行为频次 |
 
+### 对话接口
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| `POST` | `/api/chat` | 普通调用，只取当前 prompt，不做上下文（标题/文案/话术模块用） |
+| `POST` | `/api/chat-stream` | 大模型流式输出（闲聊兜底），SSE：`thinking → answering`，2000 token 上下文 |
+
 ### Agent / Skill 接口
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| `POST` | `/api/agent/ask` | 意图识别 + Skill 分派（返回 `{skill, answer, data}`） |
-| `POST` | `/api/agent/ask/stream` | 同上，SSE 流式逐字输出 |
+| `POST` | `/api/agent/route` | 轻量意图路由：只跑 matcher 返回 `{skill }`，不执行 Skill / LLM，前端据此选流式接口 |
+| `POST` | `/api/agent/skill/product-metrics/stream` | Skill 1 查数流式，SSE：`thinking → tool_calling → answering → done`（网络显示 `product-metrics`） |
+| `POST` | `/api/agent/skill/copywriting/stream` | Skill 2 文案流式，同上状态机（网络显示 `copywriting`） |
+| `POST` | `/api/agent/skill/customer-service/stream` | Skill 3 客服流式，同上状态机（网络显示 `customer-service`） |
+| `POST` | `/api/agent/ask` | 意图识别 + Skill 分派（返回 `{skill, answer, data}`，兼容旧调用） |
 | `GET` | `/api/agent/skill/product-metrics` | Skill 1 直调（纯 JSON，不经过 LLM） |
-| `POST` | `/api/agent/skill/copywriting` | Skill 2 直调（多套文案 + 极限词校验） |
+| `POST` | `/api/agent/skill/copywriting` | Skill 2 直调（多套文案 + 极限词校验，支持 `history`） |
 | `POST` | `/api/agent/skill/customer-service` | Skill 3 直调（FAQ 优先） |
 | `GET` | `/api/agent/faq` | FAQ 知识库列表 |
 
@@ -566,14 +570,14 @@ Content-Type: application/json
 
 ### AI 对话报「API key not configured」
 
-- `frontend/.env.local` 是否配置了 `DEEPSEEK_API_KEY`
-- 修改 `.env` 后是否**重启前端** dev（vite 代理读环境变量，光热更新不重新加载）
-- 若 skill 返回异常，浏览器 F12 看对 `/api/agent/ask` 的网络请求
+- 确认 `backend/.env` 已配置 `DEEPSEEK_API_KEY`（现在所有 AI 请求都走 FastAPI 转发，前端不再需要 Key）
+- 修改 `.env` 后是否**重启后端**（uvicorn 读环境变量）
+- 若 skill 返回异常，浏览器 F12 看对 `/api/agent/route` 及三个 `/stream` 接口的网络请求
 
 ### 文案 / 客服未走 Skill，直接进大模型
 
 - 检查问题是否含 Skill 关键词（文案/标题/卖点/客服/退货/退款/发货/物流…）
-- `frontend/src/utils/backendApi.ts` 的 `looksLikeSkillQuery` 命中后才会走后端；若命中仍直接对话，查看后端是否已重启加载最新 `agent.py`
+- 前端先调 `/api/agent/route` 轻量路由判断 `skill`，命中后才会走对应流式接口；若命中仍直接对话，查看后端是否已重启加载最新 `agent.py`
 
 ### `npm run dev` 找不到 `package.json`
 
@@ -597,7 +601,6 @@ Content-Type: application/json
 ## 🌱 后续优化方向
 
 - 🚧 **Skill 4：库存 / 补货预警**：基于 `product.stock_status` 与销量趋势，主动提示补货优先级
-- 🚧 **多轮记忆增强**：客服 Skill 的 `history` 目前可传，可在前端把会话上下文自动带到 Skill 3 实现真正多轮
 - 🚧 **文案批量摊销**：调用文案 Skill 后保存营销方案到 IndexedDB，支持「重新生成」时做去重，避免重复角度
 - 🚧 **登录与多用户**：当前为单用户本地 Demo，可增加用户隔离与权限
 - 🚧 **告警 / 巡检**：仪表盘预警目前基于订单状态统计，可接入库存、退款异常等实时规则

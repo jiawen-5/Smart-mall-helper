@@ -18,6 +18,9 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models
 from ..config import settings
+from ..context import CONTEXT_BUDGET as _CONTEXT_BUDGET
+from ..context import estimate_tokens as _estimate_tokens
+from ..context import trim_history as _trim_history
 from ..skills import SKILLS
 from ..skills.copywriting import parse_fields as _parse_copy_fields
 
@@ -125,39 +128,6 @@ def template_answer(data: dict, question: str = "") -> str:
             f"GMV 最高的是「{data['compare']['top_by_gmv']}」。"
         )
     return "\n".join(lines)
-
-
-_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\uff00-\uffef]")
-_CONTEXT_BUDGET = 2000
-
-
-def _estimate_tokens(text: str) -> int:
-    s = text or ""
-    cjk = len(_CJK_RE.findall(s))
-    rest = _CJK_RE.sub(" ", s)
-    words = [w for w in re.split(r"[\s,，、；;|/\\？?！!：:。.\"'“”‘’（）()\[\]{}<>~`@#$%^&*+=_-]+", rest) if w]
-    en = sum(1 if re.search(r"[A-Za-z0-9]", w) else -(-len(w) // 4) for w in words)
-    return cjk * 2 + en
-
-
-def _trim_history(history: list[dict] | None, budget: int = _CONTEXT_BUDGET) -> list[dict]:
-    """token 预算裁剪：从最新往前累加，超预算即停，丢弃更早消息。"""
-    clean = [
-        {"role": h.get("role", "user"), "content": (h.get("content") or "").strip()}
-        for h in (history or [])
-        if isinstance(h, dict) and (h.get("content") or "").strip()
-    ]
-    kept: list[dict] = []
-    used = 0
-    for h in reversed(clean):
-        cost = _estimate_tokens(h["content"]) + 4
-        if kept and used + cost > budget:
-            break
-        kept.insert(0, h)
-        used += cost
-        if used >= budget:
-            break
-    return kept
 
 
 async def llm_polish(question: str, data: dict, history: list[dict] | None = None) -> str | None:
@@ -390,6 +360,7 @@ class CopywritingIn(BaseModel):
     regenerate: bool = False
     avoid: list[str] | None = None
     fields: list[str] | None = None  # 如 ["title"]：只要标题就只返回标题
+    history: list[dict] | None = None
 
 
 @router.post("/skill/copywriting")
@@ -408,6 +379,7 @@ async def skill_copywriting(body: CopywritingIn, db: Session = Depends(get_db)):
         regenerate=body.regenerate,
         avoid=body.avoid,
         fields=body.fields,
+        history=body.history,
     )
 
 
@@ -440,3 +412,74 @@ def faq_list(category: str | None = None):
     from ..skills.faq import list_faq
 
     return list_faq(category)
+
+
+class RouteIn(BaseModel):
+    question: str
+    history: list[dict] | None = None
+
+
+@router.post("/route")
+def route(body: RouteIn):
+    """轻量意图路由：只做 matcher，不跑 Skill/LLM，供前端决定打哪个流式接口。"""
+    trimmed = _trim_history(body.history)
+    question = _rewrite_with_history(body.question, trimmed)
+    for s in SKILLS:
+        if s["matcher"](question):
+            return {"skill": s["name"], "question": question}
+    return {"skill": None, "question": question}
+
+
+def _sse_answer(skill_name: str, answer: str, data: dict):
+    yield f"data: {json.dumps({'status': 'thinking', 'skill': skill_name}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'status': 'tool_calling', 'skill': skill_name}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'status': 'answering', 'skill': skill_name}, ensure_ascii=False)}\n\n"
+    for i in range(0, len(answer), 12):
+        yield f"data: {json.dumps({'delta': answer[i:i + 12]}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'done': True, 'skill': skill_name, 'data': data}, ensure_ascii=False)}\n\n"
+
+
+async def _answer_for(skill_name: str, body: AskIn, db: Session) -> tuple:
+    trimmed = _trim_history(body.history)
+    question = _rewrite_with_history(body.question, trimmed)
+    body.question = question
+    body.history = trimmed
+    for s in SKILLS:
+        if s["name"] != skill_name:
+            continue
+        data = await _run_skill(s, body, db)
+        if s.get("polish"):
+            concise = bool(re.search(r"(只返回|只要|仅返回|只告诉我|只显示|只给)", question or ""))
+            if concise:
+                return (s["name"], template_answer(data, question), data)
+            polished = await llm_polish(question, data, trimmed)
+            return (s["name"], polished or template_answer(data, question), data)
+        if s["name"] == "copywriting":
+            return (s["name"], format_copywriting_answer(data, question), data)
+        return (s["name"], format_customer_service_answer(data), data)
+    return (None, "未命中该 Skill", {})
+
+
+@router.post("/skill/product-metrics/stream")
+async def skill_product_metrics_stream(body: AskIn, db: Session = Depends(get_db)):
+    """Skill 流式：thinking → tool_calling → answering，网络显示调 product-metrics 接口。"""
+    skill_name, answer, data = await _answer_for("product_metrics", body, db)
+    return StreamingResponse(_sse_answer(skill_name, answer, data), media_type="text/event-stream")
+
+
+@router.post("/skill/copywriting/stream")
+async def skill_copywriting_stream(body: CopywritingIn, db: Session = Depends(get_db)):
+    """Skill 流式：thinking → tool_calling → answering，网络显示调 copywriting 接口。"""
+    ask = AskIn(question=body.question, platform=body.platform, style=body.style,
+                variants=body.variants, length=body.length, regenerate=body.regenerate, avoid=body.avoid,
+                history=body.history)
+    skill_name, answer, data = await _answer_for("copywriting", ask, db)
+    return StreamingResponse(_sse_answer(skill_name, answer, data), media_type="text/event-stream")
+
+
+@router.post("/skill/customer-service/stream")
+async def skill_customer_service_stream(body: CustomerServiceIn, db: Session = Depends(get_db)):
+    """Skill 流式：thinking → tool_calling → answering，网络显示调 customer-service 接口。"""
+    ask = AskIn(question=body.question, platform=body.platform, order_id=body.order_id, history=body.history)
+    skill_name, answer, data = await _answer_for("customer_service", ask, db)
+    return StreamingResponse(_sse_answer(skill_name, answer, data), media_type="text/event-stream")
